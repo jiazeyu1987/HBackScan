@@ -1,0 +1,150 @@
+# 医院层级扫查微服务 Docker Compose配置
+version: '3.8'
+
+services:
+  # 主应用服务
+  hospital-scanner:
+    build: .
+    container_name: hospital-scanner-api
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - DATABASE_URL=sqlite:///data/hospital_scanner.db
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - hospital-scanner-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Redis服务（用于缓存和任务队列）
+  redis:
+    image: redis:7-alpine
+    container_name: hospital-scanner-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    restart: unless-stopped
+    networks:
+      - hospital-scanner-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Celery Worker（可选的任务队列）
+  celery-worker:
+    build: .
+    container_name: hospital-scanner-worker
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - DATABASE_URL=sqlite:///data/hospital_scanner.db
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - hospital-scanner-network
+    profiles:
+      - worker
+
+  # Nginx反向代理（可选）
+  nginx:
+    image: nginx:alpine
+    container_name: hospital-scanner-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf
+      - ./config/ssl:/etc/nginx/ssl
+    depends_on:
+      - hospital-scanner
+    restart: unless-stopped
+    networks:
+      - hospital-scanner-network
+    profiles:
+      - nginx
+
+  # 监控服务（可选）
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hospital-scanner-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - hospital-scanner-network
+    profiles:
+      - monitoring
+
+  # Grafana可视化（可选）
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hospital-scanner-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - hospital-scanner-network
+    profiles:
+      - monitoring
+
+# 网络配置
+networks:
+  hospital-scanner-network:
+    driver: bridge
+    name: hospital-scanner-net
+
+# 数据卷配置
+volumes:
+  redis_data:
+    driver: local
+    name: hospital-scanner-redis
+  prometheus_data:
+    driver: local
+    name: hospital-scanner-prometheus
+  grafana_data:
+    driver: local
+    name: hospital-scanner-grafana

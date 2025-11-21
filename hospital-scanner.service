@@ -1,0 +1,41 @@
+[Unit]
+Description=Hospital Scanner Service
+Documentation=https://github.com/hospital-scanner/docs
+After=docker.service
+Requires=docker.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+WorkingDirectory=/opt/hospital-scanner
+ExecStart=/usr/local/bin/docker-compose -f docker-compose.prod.yml up -d
+ExecStop=/usr/local/bin/docker-compose -f docker-compose.prod.yml down
+ExecReload=/usr/local/bin/docker-compose -f docker-compose.prod.yml restart
+TimeoutStartSec=300
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=30
+
+# 环境变量
+Environment=COMPOSE_PROJECT_NAME=hospital-scanner
+Environment=COMPOSE_FILE=docker-compose.prod.yml
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# 日志设置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hospital-scanner
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hospital-scanner
+ReadWritePaths=/var/lib/docker
+
+[Install]
+WantedBy=multi-user.target

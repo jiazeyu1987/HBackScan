@@ -1,0 +1,244 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Project specific
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+logs/*.log
+logs/archive/
+uploads/*
+!uploads/.gitkeep
+backups/
+profile_output.prof
+
+# Docker
+.docker/
+
+# Nginx
+config/ssl/*.pem
+config/ssl/*.key
+config/ssl/*.crt
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Database dumps
+*.sql
+*.dump
+
+# Configuration files (local only)
+config/local.yml
+config/local.json
+config/development.yml
+config/production.yml
+
+# Application specific
+*.pid
+*.seed
+*.pid.lock
+.nyc_output
+
+# OS generated files
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Vim
+*.swp
+*.swo
+.*.swp
+.*.swo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Project specific directories
+data/raw/
+data/processed/
+data/exports/
+reports/
+static/
+media/
+
+# API keys and secrets (these should be in .env)
+secrets/
+credentials/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# LLM specific
+llm_cache/
+model_cache/
+embeddings_cache/
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Test artifacts
+test_results/
+coverage_reports/
+performance_reports/
+
+# Local development
+.local/
+local_settings.py
+debug.log
+error.log
+access.log
