@@ -392,6 +392,33 @@ class Database:
             logger.error(f"根据名称获取省份信息失败: {e}")
             return None
 
+    async def get_province_by_id(self, province_id: int):
+        """根据省份ID获取省份信息"""
+        try:
+            logger.info(f"🔍 查询省份ID: {province_id}")
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT * FROM provinces WHERE id = ? LIMIT 1",
+                    (province_id,)
+                )
+
+                result = cursor.fetchone()
+                logger.info(f"📊 查询省份结果: {'找到' if result else '未找到'} ID={province_id}")
+
+                if result:
+                    logger.info(f"✅ 省份信息: ID={result['id']}, 名称={result['name']}")
+                    return dict(result)
+                else:
+                    logger.info(f"❌ 省份不存在: ID={province_id}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"根据ID获取省份信息失败: {e}")
+            return None
+
     async def get_provinces(self, page: int = 1, page_size: int = 20) -> tuple:
         """获取省份列表（分页）"""
         try:
@@ -481,6 +508,33 @@ class Database:
 
         except Exception as e:
             logger.error(f"根据名称获取城市信息失败: {e}")
+            return None
+
+    async def get_city_by_id(self, city_id: int):
+        """根据城市ID获取城市信息"""
+        try:
+            logger.info(f"🔍 查询城市ID: {city_id}")
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT * FROM cities WHERE id = ? LIMIT 1",
+                    (city_id,)
+                )
+
+                result = cursor.fetchone()
+                logger.info(f"📊 查询城市结果: {'找到' if result else '未找到'} ID={city_id}")
+
+                if result:
+                    logger.info(f"✅ 城市信息: ID={result['id']}, 名称={result['name']}, 省份ID={result['province_id']}")
+                    return dict(result)
+                else:
+                    logger.info(f"❌ 城市不存在: ID={city_id}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"根据ID获取城市信息失败: {e}")
             return None
 
     async def get_cities(self, province_id: int = None, page: int = 1, page_size: int = 20) -> tuple:
@@ -649,26 +703,26 @@ class Database:
             return [], 0
 
     # 医院数据操作
-    async def create_hospital(self, name: str, district_id: int = None, level: str = None, 
-                            address: str = None, phone: str = None, beds_count: int = None, 
-                            staff_count: int = None, departments: list = None, 
-                            specializations: list = None) -> int:
+    async def create_hospital(self, name: str, district_id: int = None, level: str = None,
+                            address: str = None, phone: str = None, beds_count: int = None,
+                            staff_count: int = None, departments: list = None,
+                            specializations: list = None, website: str = None) -> int:
         """创建医院"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 now = datetime.now().isoformat()
-                
+
                 cursor.execute("""
-                    INSERT INTO hospitals 
-                    (name, level, district_id, address, phone, beds_count, staff_count, 
-                     departments, specializations, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO hospitals
+                    (name, level, district_id, address, phone, beds_count, staff_count,
+                     departments, specializations, website, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     name, level, district_id, address, phone, beds_count, staff_count,
                     json.dumps(departments or [], ensure_ascii=False),
                     json.dumps(specializations or [], ensure_ascii=False),
-                    now, now
+                    website, now, now
                 ))
                 
                 hospital_id = cursor.lastrowid
@@ -760,6 +814,96 @@ class Database:
         except Exception as e:
             logger.error(f"搜索医院失败: {e}")
             return []
+
+    async def get_hospital_by_name_and_district(self, hospital_name: str, district_id: int) -> dict:
+        """根据医院名称和区县ID获取医院信息"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT * FROM hospitals
+                    WHERE name = ? AND district_id = ?
+                    LIMIT 1
+                """, (hospital_name, district_id))
+
+                row = cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, row))
+                else:
+                    return None
+
+        except Exception as e:
+            logger.error(f"根据名称和区县查询医院失败: {e}")
+            return None
+
+    async def update_hospital(self, hospital_id: int, name: str = None, level: str = None,
+                            address: str = None, phone: str = None, beds_count: int = None,
+                            staff_count: int = None, departments: list = None,
+                            specializations: list = None, website: str = None) -> bool:
+        """更新医院信息"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 构建更新字段列表
+                update_fields = []
+                update_values = []
+
+                if name is not None:
+                    update_fields.append("name = ?")
+                    update_values.append(name)
+                if level is not None:
+                    update_fields.append("level = ?")
+                    update_values.append(level)
+                if address is not None:
+                    update_fields.append("address = ?")
+                    update_values.append(address)
+                if phone is not None:
+                    update_fields.append("phone = ?")
+                    update_values.append(phone)
+                if beds_count is not None:
+                    update_fields.append("beds_count = ?")
+                    update_values.append(beds_count)
+                if staff_count is not None:
+                    update_fields.append("staff_count = ?")
+                    update_values.append(staff_count)
+                if departments is not None:
+                    update_fields.append("departments = ?")
+                    update_values.append(json.dumps(departments, ensure_ascii=False))
+                if specializations is not None:
+                    update_fields.append("specializations = ?")
+                    update_values.append(json.dumps(specializations, ensure_ascii=False))
+                if website is not None:
+                    update_fields.append("website = ?")
+                    update_values.append(website)
+
+                if not update_fields:
+                    # 没有需要更新的字段
+                    return True
+
+                # 添加updated_at字段
+                update_fields.append("updated_at = CURRENT_TIMESTAMP")
+
+                # 添加hospital_id到值列表
+                update_values.append(hospital_id)
+
+                # 构建并执行更新语句
+                update_sql = f"""
+                    UPDATE hospitals
+                    SET {', '.join(update_fields)}
+                    WHERE id = ?
+                """
+
+                cursor.execute(update_sql, update_values)
+                conn.commit()
+
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"更新医院信息失败: {e}")
+            return False
 
     async def get_task_info(self, task_id: str) -> dict:
         """获取任务基本信息"""

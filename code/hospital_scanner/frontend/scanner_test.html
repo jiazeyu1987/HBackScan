@@ -369,6 +369,116 @@
         .hidden {
             display: none;
         }
+
+        .hospital-search-section {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 25px;
+        }
+
+        .hospital-search-section h3 {
+            color: #28a745;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .hospital-item {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .hospital-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+        }
+
+        .hospital-name {
+            font-size: 18px;
+            font-weight: bold;
+            color: #007bff;
+            margin-bottom: 10px;
+        }
+
+        .hospital-level {
+            display: inline-block;
+            background: #17a2b8;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        .hospital-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+
+        .hospital-info-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #6c757d;
+        }
+
+        .hospital-info-item strong {
+            color: #495057;
+        }
+
+        .hospital-website {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .hospital-website a {
+            color: #007bff;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        .hospital-website a:hover {
+            text-decoration: underline;
+        }
+
+        .no-results {
+            text-align: center;
+            padding: 30px;
+            color: #6c757d;
+            font-style: italic;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #007bff;
+        }
+
+        .loading::after {
+            content: '';
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-left: 10px;
+            border: 2px solid #007bff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -614,6 +724,34 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- 医院查询 -->
+            <div class="hospital-search-section">
+                <h3>🏥 区县医院查询</h3>
+                <div style="margin-bottom: 20px;">
+                    <label for="districtSelect" style="display: block; margin-bottom: 8px; font-weight: bold; color: #495057;">
+                        选择区/县：
+                    </label>
+                    <select id="districtSelect" style="width: 100%; padding: 10px; border: 2px solid #dee2e6; border-radius: 8px; font-size: 14px; background-color: #f8f9fa;">
+                        <option value="">请选择区/县...</option>
+                    </select>
+                </div>
+
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <button id="searchHospitalsBtn" class="btn btn-primary" onclick="searchHospitalsByDistrict()" style="padding: 12px 30px;">
+                        🔍 查询医院
+                    </button>
+                    <button id="clearHospitalResultsBtn" class="btn btn-secondary" onclick="clearHospitalResults()" style="margin-left: 10px; padding: 12px 30px;">
+                        🔄 清空结果
+                    </button>
+                </div>
+
+                <div id="hospitalResults" style="display: none;">
+                    <h4 style="color: #28a745; margin-bottom: 15px;">📋 查询结果</h4>
+                    <div id="hospitalCount" style="margin-bottom: 15px; font-weight: bold; color: #6c757d;"></div>
+                    <div id="hospitalList" style="max-height: 400px; overflow-y: auto;"></div>
                 </div>
             </div>
 
@@ -1740,10 +1878,174 @@
             districtResults.style.display = 'block';
         }
 
+        // 医院查询功能
+        async function loadDistricts() {
+            try {
+                const response = await fetch(`${API_BASE}/districts`);
+                const data = await response.json();
+
+                const districtSelect = document.getElementById('districtSelect');
+                districtSelect.innerHTML = '<option value="">请选择区/县...</option>';
+
+                data.items.forEach(district => {
+                    const option = document.createElement('option');
+                    option.value = district.name;
+                    option.textContent = district.name;
+                    districtSelect.appendChild(option);
+                });
+
+                addLog(`成功加载 ${data.total} 个区/县数据`, 'success');
+            } catch (error) {
+                console.error('加载区县数据失败:', error);
+                addLog(`加载区县数据失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function searchHospitalsByDistrict() {
+            const districtSelect = document.getElementById('districtSelect');
+            const selectedDistrict = districtSelect.value;
+
+            if (!selectedDistrict) {
+                alert('请先选择一个区/县');
+                return;
+            }
+
+            const searchBtn = document.getElementById('searchHospitalsBtn');
+            const resultsDiv = document.getElementById('hospitalResults');
+            const countDiv = document.getElementById('hospitalCount');
+            const listDiv = document.getElementById('hospitalList');
+
+            // 显示加载状态
+            searchBtn.disabled = true;
+            searchBtn.innerHTML = '查询中<span class="loading"></span>';
+            resultsDiv.style.display = 'block';
+            countDiv.textContent = '正在查询医院信息...';
+            listDiv.innerHTML = '';
+
+            try {
+                // 构建查询URL
+                const encodedDistrict = encodeURIComponent(selectedDistrict);
+                const response = await fetch(`${API_BASE}/hospitals?district=${encodedDistrict}&page_size=100`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    if (data.items && data.items.length > 0) {
+                        displayHospitalResults(data.items, selectedDistrict, data.total);
+                        addLog(`成功查询到 ${data.total} 家医院信息`, 'success');
+                    } else {
+                        displayNoResults(selectedDistrict);
+                        addLog(`未找到 ${selectedDistrict} 的医院信息`, 'warning');
+                    }
+                } else {
+                    throw new Error(data.detail || '查询失败');
+                }
+            } catch (error) {
+                console.error('查询医院失败:', error);
+                countDiv.textContent = '查询失败，请稍后重试';
+                listDiv.innerHTML = `<div class="no-results">查询失败: ${error.message}</div>`;
+                addLog(`查询医院失败: ${error.message}`, 'error');
+            } finally {
+                searchBtn.disabled = false;
+                searchBtn.innerHTML = '🔍 查询医院';
+            }
+        }
+
+        function displayHospitalResults(hospitals, districtName, totalCount) {
+            const countDiv = document.getElementById('hospitalCount');
+            const listDiv = document.getElementById('hospitalList');
+
+            countDiv.textContent = `📋 ${districtName} 共找到 ${totalCount} 家医院：`;
+
+            listDiv.innerHTML = hospitals.map(hospital => `
+                <div class="hospital-item">
+                    <div class="hospital-name">${hospital.name}</div>
+                    ${hospital.level ? `<div class="hospital-level">${hospital.level}</div>` : ''}
+
+                    <div class="hospital-info">
+                        ${hospital.address ? `
+                            <div class="hospital-info-item">
+                                <strong>📍 地址:</strong> ${hospital.address}
+                            </div>
+                        ` : ''}
+
+                        ${hospital.phone ? `
+                            <div class="hospital-info-item">
+                                <strong>📞 电话:</strong> ${hospital.phone}
+                            </div>
+                        ` : ''}
+
+                        ${hospital.beds_count ? `
+                            <div class="hospital-info-item">
+                                <strong>🛏️ 床位数:</strong> ${hospital.beds_count}
+                            </div>
+                        ` : ''}
+
+                        ${hospital.staff_count ? `
+                            <div class="hospital-info-item">
+                                <strong>👥 员工数:</strong> ${hospital.staff_count}
+                            </div>
+                        ` : ''}
+
+                        <div class="hospital-info-item">
+                            <strong>🏥 ID:</strong> ${hospital.id}
+                        </div>
+
+                        <div class="hospital-info-item">
+                            <strong>📅 创建时间:</strong> ${new Date(hospital.created_at).toLocaleString()}
+                        </div>
+                    </div>
+
+                    ${hospital.departments && JSON.parse(hospital.departments || '[]').length > 0 ? `
+                        <div class="hospital-info">
+                            <div class="hospital-info-item">
+                                <strong>🏢 临床科室:</strong> ${JSON.parse(hospital.departments || '[]').join(', ')}
+                            </div>
+                        </div>
+                    ` : ''}
+
+                    ${hospital.specializations && JSON.parse(hospital.specializations || '[]').length > 0 ? `
+                        <div class="hospital-info">
+                            <div class="hospital-info-item">
+                                <strong>⭐ 特色专科:</strong> ${JSON.parse(hospital.specializations || '[]').join(', ')}
+                            </div>
+                        </div>
+                    ` : ''}
+
+                    ${hospital.website ? `
+                        <div class="hospital-website">
+                            <strong>🌐 官方网站:</strong>
+                            <a href="${hospital.website}" target="_blank" rel="noopener noreferrer">
+                                ${hospital.website}
+                            </a>
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        function displayNoResults(districtName) {
+            const countDiv = document.getElementById('hospitalCount');
+            const listDiv = document.getElementById('hospitalList');
+
+            countDiv.textContent = `${districtName} 医院查询结果`;
+            listDiv.innerHTML = '<div class="no-results">🏥 该区/县暂无医院信息</div>';
+        }
+
+        function clearHospitalResults() {
+            const districtSelect = document.getElementById('districtSelect');
+            const resultsDiv = document.getElementById('hospitalResults');
+
+            districtSelect.value = '';
+            resultsDiv.style.display = 'none';
+
+            addLog('已清空医院查询结果', 'info');
+        }
+
         // 页面加载时初始化
-        console.log('页面加载完成，开始初始化省份列表...');
-        addLog('页面初始化：开始加载省份列表', 'info');
+        console.log('页面加载完成，开始初始化数据...');
+        addLog('页面初始化：开始加载数据', 'info');
         loadProvinces();
+        loadDistricts();
     </script>
 </body>
 </html>

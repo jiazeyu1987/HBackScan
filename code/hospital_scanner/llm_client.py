@@ -629,3 +629,124 @@ class LLMClient:
         except Exception as e:
             main_logger.error(f"城市区县数据获取失败: {str(e)}")
             raise ValueError(f"城市区县数据获取失败: {str(e)}")
+
+    async def get_hospitals_from_district(self, province_name: str, city_name: str, district_name: str) -> list:
+        """获取指定区县的医院数据（仅使用真实LLM API）"""
+        try:
+            main_logger.info(f"开始获取区县医院数据: {province_name} -> {city_name} -> {district_name}")
+
+            if not district_name or len(district_name.strip()) < 2:
+                raise ValueError(f"区县名称无效！'{district_name}' 请提供有效的区县名称（至少2个字符）")
+
+            # 构造提示词
+            system_prompt = """你是一个专业的医疗信息系统专家。请根据用户指定的省市区县信息，返回该区县内的所有医院信息。
+
+请严格按照JSON数组格式返回，每个医院对象包含以下字段：
+- name: 医院名称（字符串）
+- level: 医院等级（字符串，如：三甲、三乙、二甲、二乙、一甲、一乙等，可为null）
+- address: 医院地址（字符串，可为null）
+- phone: 联系电话（字符串，可为null）
+- website: 官方网站（字符串，可为null）
+- type: 医院类型（字符串，如：综合医院、专科医院、中医医院等，可为null）
+
+注意：
+1. 必须返回有效的JSON数组格式
+2. 包含该区县内的所有公立医院和重要的私立医院
+3. 优先提供准确的官方网站信息
+4. 如果某些信息不确定，请根据公开信息进行合理推断
+5. 不要在JSON前后添加其他说明文字"""
+
+            user_prompt = f"""请查询以下区县的医院信息：
+
+省份：{province_name.strip()}
+城市：{city_name.strip()}
+区县：{district_name.strip()}
+
+请返回该区县内所有医院的详细信息。"""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            # 记录发送给LLM的提示词
+            logger.info(f"=== LLM医院查询提示词 ===")
+            logger.info(f"系统提示词: {system_prompt}")
+            logger.info(f"用户提示词: {user_prompt}")
+            logger.info(f"=========================")
+
+            # 调用LLM API
+            response = self._make_request(messages)
+
+            if not response:
+                raise ValueError("LLM API返回空响应！请检查API服务是否正常。")
+
+            # 记录LLM的回复
+            logger.info(f"=== LLM医院查询回复 ===")
+            logger.info(f"原始回复: {response}")
+            logger.info(f"回复长度: {len(response)} 字符")
+            logger.info(f"========================")
+
+            # 解析JSON响应
+            try:
+                # 清理响应文本，移除可能的markdown格式
+                response = response.strip()
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.startswith('```'):
+                    response = response[3:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+
+                # 尝试提取JSON部分
+                json_start = response.find('[')
+                json_end = response.rfind(']') + 1
+
+                if json_start == -1 or json_end == -1:
+                    raise ValueError(f"响应中未找到有效的JSON数组格式！原始响应: {response[:500]}...")
+
+                json_str = response[json_start:json_end]
+
+                # 记录解析后的JSON
+                logger.info(f"=== 解析后的医院JSON ===")
+                logger.info(f"解析的JSON: {json_str}")
+                logger.info(f"=========================")
+
+                result = json.loads(json_str)
+
+                # 验证数据类型
+                if not isinstance(result, list):
+                    raise ValueError(f"响应不是有效的数组格式！类型: {type(result)}")
+
+                # 验证数组中的每个医院对象
+                for i, item in enumerate(result):
+                    if not isinstance(item, dict):
+                        raise ValueError(f"数组中第{i+1}个元素不是对象格式")
+                    if 'name' not in item or not item['name']:
+                        raise ValueError(f"数组中第{i+1}个医院缺少name字段")
+
+                # 记录最终存储的数据
+                logger.info(f"=== 存储的医院数据 ===")
+                logger.info(f"区县名称: {district_name}")
+                logger.info(f"医院数量: {len(result)}")
+                for i, hospital in enumerate(result[:5]):  # 只显示前5个
+                    logger.info(f"  医院{i+1}: {hospital.get('name')} ({hospital.get('level', 'N/A')})")
+                if len(result) > 5:
+                    logger.info(f"  ... 还有 {len(result) - 5} 家医院")
+                logger.info(f"======================")
+
+                main_logger.info(f"区县医院数据获取完成: {district_name}，共 {len(result)} 家医院")
+                return result
+
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                logger.error(f"原始响应内容: {response}")
+                raise ValueError(f"无法解析LLM返回的医院JSON数据！解析错误: {str(e)}")
+
+        except ValueError as e:
+            # 重新抛出已知错误
+            raise e
+        except Exception as e:
+            main_logger.error(f"区县医院数据获取失败: {str(e)}")
+            raise ValueError(f"区县医院数据获取失败: {str(e)}")
