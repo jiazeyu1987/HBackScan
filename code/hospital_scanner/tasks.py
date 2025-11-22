@@ -57,21 +57,36 @@ class TaskManager:
     
     async def update_task_status(self, task_id: str, status: TaskStatus, error_message: Optional[str] = None):
         """更新任务状态"""
-        with self._lock:
-            if task_id in self.tasks:
-                self.tasks[task_id]["status"] = status.value
-                self.tasks[task_id]["updated_at"] = datetime.now().isoformat()
-                
-                if error_message:
-                    self.tasks[task_id]["error_message"] = error_message
-                
-                # 更新数据库
-                db = await get_db()
-                await db.update_task_status(task_id, status.value, error_message)
-                
-                logger.info(f"更新任务状态: {task_id} -> {status.value}")
-            else:
-                logger.warning(f"任务不存在: {task_id}")
+        try:
+            with self._lock:
+                logger.info(f"📝 尝试更新任务状态: {task_id} -> {status.value}")
+
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = status.value
+                    self.tasks[task_id]["updated_at"] = datetime.now().isoformat()
+
+                    if error_message:
+                        self.tasks[task_id]["error_message"] = error_message
+
+                    logger.info(f"✅ 内存中的任务状态已更新: {task_id} -> {status.value}")
+
+                    # 更新数据库
+                    try:
+                        db = await get_db()
+                        await db.update_task_status(task_id, status.value, error_message)
+                        logger.info(f"✅ 数据库中的任务状态已更新: {task_id}")
+                    except Exception as db_error:
+                        logger.error(f"❌ 更新数据库任务状态失败: {db_error}")
+                        # 不抛出异常，允许继续执行
+
+                    logger.info(f"🎉 任务状态更新完成: {task_id} -> {status.value}")
+                else:
+                    logger.warning(f"⚠️ 任务不存在于内存中: {task_id}")
+                    logger.info(f"📋 当前内存中的任务列表: {list(self.tasks.keys())}")
+        except Exception as e:
+            logger.error(f"❌ 更新任务状态时发生异常: {e}")
+            logger.error(f"📋 异常详情: task_id={task_id}, status={status}, error_message={error_message}")
+            raise
     
     async def save_task_result(self, task_id: str, result: ScanResult):
         """保存任务结果"""

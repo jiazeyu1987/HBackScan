@@ -365,6 +365,29 @@ class Database:
             logger.error(f"创建省份失败: {e}")
             return 0
 
+    async def get_province_by_name(self, province_name: str):
+        """根据省份名称获取省份信息"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT * FROM province WHERE name = ? LIMIT 1",
+                    (province_name,)
+                )
+
+                result = cursor.fetchone()
+
+                if result:
+                    return dict(result)
+                else:
+                    return None
+
+        except Exception as e:
+            logger.error(f"根据名称获取省份信息失败: {e}")
+            return None
+
     async def get_provinces(self, page: int = 1, page_size: int = 20) -> tuple:
         """获取省份列表（分页）"""
         try:
@@ -661,23 +684,121 @@ class Database:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                
+
                 cursor.execute("""
-                    SELECT * FROM hospitals 
-                    WHERE name LIKE ? 
-                    ORDER BY name 
+                    SELECT * FROM hospitals
+                    WHERE name LIKE ?
+                    ORDER BY name
                     LIMIT ?
                 """, (f"%{query}%", limit))
-                
+
                 rows = cursor.fetchall()
                 columns = [description[0] for description in cursor.description]
                 items = [dict(zip(columns, row)) for row in rows]
-                
+
                 return items
-                
+
         except Exception as e:
             logger.error(f"搜索医院失败: {e}")
             return []
+
+    async def get_task_info(self, task_id: str) -> dict:
+        """获取任务基本信息"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT task_id, hospital_name, query, status, created_at, updated_at, result, error_message
+                    FROM tasks
+                    WHERE task_id = ?
+                """, (task_id,))
+
+                row = cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    task_info = dict(zip(columns, row))
+
+                    # 如果有结果，尝试解析JSON
+                    if task_info.get('result'):
+                        try:
+                            import json
+                            task_info['result'] = json.loads(task_info['result'])
+                        except json.JSONDecodeError:
+                            pass
+
+                    return task_info
+
+                return None
+
+        except Exception as e:
+            logger.error(f"获取任务信息失败: {e}")
+            return None
+
+    async def clear_all_tasks(self) -> bool:
+        """删除所有任务记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 删除所有任务记录
+                cursor.execute("DELETE FROM tasks")
+
+                # 重置自增ID（如果有的话）
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name='tasks'")
+
+                conn.commit()
+                logger.info("成功删除所有任务记录")
+                return True
+
+        except Exception as e:
+            logger.error(f"删除所有任务失败: {e}")
+            return False
+
+    async def clear_all_tables_data(self) -> bool:
+        """清空所有表的数据，保留表结构"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 获取所有表名
+                cursor.execute("""
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                """)
+                tables = [row[0] for row in cursor.fetchall()]
+
+                logger.info(f"开始清空数据库表: {tables}")
+
+                # 按依赖关系顺序清空表（先清空有外键的表）
+                tables_order = [
+                    'hospital_info',  # 依赖于 tasks
+                    'hospitals',      # 依赖于 districts
+                    'districts',      # 依赖于 cities
+                    'cities',         # 依赖于 provinces
+                    'provinces',      # 无外键依赖
+                    'tasks'           # 无外键依赖
+                ]
+
+                # 按顺序清空存在的表
+                for table_name in tables_order:
+                    if table_name in tables:
+                        cursor.execute(f"DELETE FROM {table_name}")
+                        affected_rows = cursor.rowcount
+                        logger.info(f"已清空表 {table_name}，删除了 {affected_rows} 行数据")
+
+                # 重置自增ID
+                for table_name in tables:
+                    cursor.execute(f"DELETE FROM sqlite_sequence WHERE name='{table_name}'")
+
+                conn.commit()
+
+                logger.info("所有数据库表数据清空完成，表结构保留")
+                return True
+
+        except Exception as e:
+            logger.error(f"清空数据库失败: {e}")
+            return False
 
 # 全局数据库实例
 _db_instance = None
@@ -694,3 +815,15 @@ async def init_db():
     db = await get_db()
     await db.init_db()
     return db
+
+# 清空数据库的方法
+async def clear_all_data():
+    """清空所有表的数据，保留表结构"""
+    db = await get_db()
+    return await db.clear_all_tables_data()
+
+# 清空所有任务的方法
+async def clear_all_tasks():
+    """删除所有任务记录"""
+    db = await get_db()
+    return await db.clear_all_tasks()

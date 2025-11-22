@@ -1067,7 +1067,7 @@ def main():
     print("=== 测试省份操作 ===")
     
     # 创建省份
-    province_id = db.upsert_province("广东省", "GD")
+    province_id = db.upsert_province("示例省份", "EX")
     print(f"创建省份ID: {province_id}")
     
     # 查询省份
@@ -1107,16 +1107,16 @@ def main():
     print("\n=== 测试查询方法 ===")
     
     # 按省份查询城市
-    cities_result = db.get_cities_by_province("广东省")
-    print(f"广东省城市数量: {cities_result['total']}")
+    cities_result = db.get_cities_by_province("示例省份")
+    print(f"示例省份城市数量: {cities_result['total']}")
     
     # 按城市查询区县
-    districts_result = db.get_districts_by_city("深圳市")
-    print(f"深圳市区县数量: {districts_result['total']}")
+    districts_result = db.get_districts_by_city("示例城市")
+    print(f"示例城市区县数量: {districts_result['total']}")
     
     # 按区县查询医院
-    hospitals_result = db.get_hospitals_by_district("南山区")
-    print(f"南山区医院数量: {hospitals_result['total']}")
+    hospitals_result = db.get_hospitals_by_district("示例区县")
+    print(f"示例区县医院数量: {hospitals_result['total']}")
     
     # 搜索医院
     search_result = db.search_hospitals("人民医院")

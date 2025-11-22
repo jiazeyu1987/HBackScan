@@ -108,6 +108,9 @@ class DashScopeLLMClient:
                 if response.status_code == 200:
                     result = response.json()
                     self.logger.info("API请求成功")
+
+                    # 记录完整的API响应内容用于调试
+                    self.logger.info(f"📋 完整API响应:\n{json.dumps(result, ensure_ascii=False, indent=2)}")
                     self.logger.debug(f"响应内容: {json.dumps(result, ensure_ascii=False, indent=2)}")
                     return result
                 else:
@@ -138,21 +141,56 @@ class DashScopeLLMClient:
     def _parse_response(self, response_data: Dict, expected_format: str) -> Dict:
         """
         解析API响应并验证格式
-        
+
         Args:
             response_data: API响应数据
             expected_format: 期望的格式类型 ('province', 'city', 'district', 'hospital')
-            
+
         Returns:
             解析后的标准化数据
         """
+        # 记录接收到的响应数据结构
+        self.logger.info(f"🔍 开始解析响应数据，期望格式: {expected_format}")
+        self.logger.info(f"📥 接收到的响应数据结构:\n{json.dumps(response_data, ensure_ascii=False, indent=2)}")
+
         try:
-            # 提取文本内容
-            if 'output' not in response_data or 'text' not in response_data['output']:
-                raise ValueError("响应格式不正确，缺少output.text字段")
-            
-            text_content = response_data['output']['text']
-            self.logger.info(f"提取的文本内容: {text_content}")
+            text_content = None
+
+            # 尝试不同的API响应格式
+            if 'output' in response_data:
+                output = response_data['output']
+
+                # DashScope格式: output.text
+                if 'text' in output:
+                    text_content = output['text']
+                    self.logger.info("🔍 使用DashScope格式解析: output.text")
+                # OpenAI兼容格式: output.choices[0].message.content
+                elif 'choices' in output and len(output['choices']) > 0:
+                    choice = output['choices'][0]
+                    if 'message' in choice and 'content' in choice['message']:
+                        text_content = choice['message']['content']
+                        self.logger.info("🔍 使用OpenAI兼容格式解析: output.choices[0].message.content")
+                    else:
+                        self.logger.error(f"❌ OpenAI格式中缺少message.content: {choice}")
+                else:
+                    self.logger.error(f"❌ output字段格式不支持，包含的键: {list(output.keys()) if isinstance(output, dict) else 'N/A'}")
+            else:
+                self.logger.error(f"❌ 响应数据中缺少output字段，响应键: {list(response_data.keys())}")
+
+            if text_content is None:
+                self.logger.error(f"❌ 无法从API响应中提取文本内容")
+                self.logger.error(f"❌ 响应数据结构分析:")
+                self.logger.error(f"   - 'output' 字段存在: {'output' in response_data}")
+                if 'output' in response_data:
+                    self.logger.error(f"   - 'output' 字段内容: {response_data['output']}")
+                    self.logger.error(f"   - 'text' 字段存在: {'text' in response_data['output']}")
+                    if isinstance(response_data['output'], dict):
+                        self.logger.error(f"   - 'output' 中的所有键: {list(response_data['output'].keys())}")
+                self.logger.error(f"   - 响应数据所有键: {list(response_data.keys())}")
+                raise ValueError("响应格式不正确，无法提取文本内容")
+
+            self.logger.info(f"📝 提取的文本内容长度: {len(text_content)} 字符")
+            self.logger.debug(f"📝 提取的文本内容: {text_content[:500]}...")  # 只显示前500字符
             
             # 解析JSON
             try:
@@ -288,6 +326,9 @@ class DashScopeLLMClient:
         """
         self.logger.info("开始获取省级数据")
         prompt = self._build_prompt('province')
+
+        # 记录完整的提示词内容用于调试
+        self.logger.info(f"📝 省级提示词内容:\n{prompt}")
         
         payload = {
             'model': self.model,
@@ -323,6 +364,9 @@ class DashScopeLLMClient:
         """
         self.logger.info(f"开始获取{province}的市级数据")
         prompt = self._build_prompt('city', province)
+
+        # 记录完整的提示词内容用于调试
+        self.logger.info(f"📝 市级提示词内容 (省份: {province}):\n{prompt}")
         
         payload = {
             'model': self.model,
@@ -358,6 +402,9 @@ class DashScopeLLMClient:
         """
         self.logger.info(f"开始获取{city}的区县级数据")
         prompt = self._build_prompt('district', city)
+
+        # 记录完整的提示词内容用于调试
+        self.logger.info(f"📝 区县级提示词内容 (城市: {city}):\n{prompt}")
         
         payload = {
             'model': self.model,
@@ -393,6 +440,9 @@ class DashScopeLLMClient:
         """
         self.logger.info(f"开始获取{district}的医院数据")
         prompt = self._build_prompt('hospital', district)
+
+        # 记录完整的提示词内容用于调试
+        self.logger.info(f"📝 医院级提示词内容 (区县: {district}):\n{prompt}")
         
         payload = {
             'model': self.model,

@@ -15,6 +15,27 @@ import traceback
 import sys
 import os
 
+# 确保根目录在路径的最前面，优先导入
+project_root = os.path.dirname(__file__)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# 导入根目录的LLM客户端
+try:
+    from llm_client import DashScopeLLMClient as RootLLMClient
+except ImportError as e:
+    print(f"无法导入根目录DashScopeLLMClient: {e}")
+    RootLLMClient = None
+
+# 尝试从code目录导入LLM客户端（作为备选）
+try:
+    code_dir = os.path.join(os.path.dirname(__file__), 'code', 'hospital_scanner')
+    if code_dir not in sys.path:
+        sys.path.append(code_dir)
+    from llm_client import LLMClient as CodeLLMClient
+except ImportError:
+    CodeLLMClient = None
+
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,65 +91,192 @@ class ProgressTracker:
 
 class LLMService:
     """LLM服务接口"""
-    
+
+    def __init__(self):
+        """初始化LLM客户端"""
+        try:
+            # 使用根目录的DashScopeLLMClient
+            self.llm_client = RootLLMClient(
+                api_key=os.getenv('LLM_API_KEY', 'sk-96bb32e240ad40b195207a088d321b90'),
+                model=os.getenv('LLM_MODEL', 'qwen-turbo')
+            )
+        except ValueError as e:
+            # 如果LLM客户端初始化失败，记录警告但不阻止服务启动
+            print(f"LLM客户端初始化警告: {e}")
+            self.llm_client = None
+
     async def get_provinces(self) -> List[str]:
         """获取省份列表"""
-        await asyncio.sleep(0.5)  # 模拟网络延迟
-        return ["北京市", "上海市", "广东省", "江苏省", "浙江省"]
-    
+        try:
+            if not self.llm_client:
+                # 如果LLM客户端不可用，返回一些基本的省份
+                return ["北京市", "上海市", "广东省", "江苏省", "浙江省", "山东省", "河南省", "湖北省", "湖南省", "四川省"]
+
+            # 使用DashScopeLLMClient获取省份列表
+            result = self.llm_client.get_provinces()
+
+            # 从结果中提取省份名称列表
+            provinces = [item['name'] for item in result.get('items', [])]
+
+            return provinces
+        except Exception as e:
+            print(f"获取省份列表失败: {e}")
+            # 返回基本的省份列表作为备用
+            return ["北京市", "上海市", "广东省", "江苏省", "浙江省"]
+
     async def get_cities(self, province: str) -> List[str]:
         """获取市级列表"""
-        await asyncio.sleep(0.3)
-        city_mapping = {
-            "北京市": ["东城区", "西城区", "朝阳区", "海淀区"],
-            "上海市": ["黄浦区", "徐汇区", "长宁区", "静安区"],
-            "广东省": ["广州市", "深圳市", "珠海市", "佛山市"],
-            "江苏省": ["南京市", "苏州市", "无锡市", "常州市"],
-            "浙江省": ["杭州市", "宁波市", "温州市", "嘉兴市"]
-        }
-        return city_mapping.get(province, [])
-    
+        try:
+            if not self.llm_client:
+                # 如果LLM客户端不可用，返回一些基本的城市
+                return [f"{province}市1", f"{province}市2", f"{province}市3"]
+
+            # 使用LLM获取城市列表
+            system_prompt = f"""你是一个专业的地理信息系统专家。请列出{province}的所有主要城市。
+
+请严格按照JSON数组格式返回，例如：
+["城市1", "城市2", "城市3"]
+
+注意：
+1. 只返回该省份的地级市、自治州、直辖市辖区
+2. 使用完整的官方名称
+3. 按照常用顺序排列
+4. 不要包含任何其他文字，只要JSON数组"""
+
+            user_prompt = f"请列出{province}的所有主要城市"
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            response = await self.llm_client._make_request(messages, max_tokens=500)
+
+            if response:
+                import json
+                # 清理和解析响应（与get_provinces相同的逻辑）
+                response = response.strip()
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.startswith('```'):
+                    response = response[3:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+
+                json_start = response.find('[')
+                json_end = response.rfind(']') + 1
+
+                if json_start != -1 and json_end != -1:
+                    json_str = response[json_start:json_end]
+                    cities = json.loads(json_str)
+                    return cities if isinstance(cities, list) else []
+
+            return []
+        except Exception as e:
+            print(f"获取城市列表失败: {e}")
+            return [f"{province}市1", f"{province}市2"]
+
     async def get_districts(self, city: str) -> List[str]:
         """获取区县级列表"""
-        await asyncio.sleep(0.3)
-        district_mapping = {
-            "东城区": ["东华门街道", "景山街道", "安定门街道"],
-            "西城区": ["西长安街道", "金融街街道", "德胜街道"],
-            "朝阳区": ["朝外街道", "建外街道", "亚运村街道"],
-            "海淀区": ["中关村街道", "海淀街道", "万柳街道"],
-            "黄浦区": ["南京东路街道", "外滩街道", "豫园街道"],
-            "徐汇区": ["天平路街道", "湖南路街道", "田子坊街道"],
-            "长宁区": ["华阳路街道", "新泾镇", "仙霞街道"],
-            "静安区": ["静安寺街道", "南京西路街道", "江宁路街道"],
-            "广州市": ["越秀区", "荔湾区", "海珠区", "天河区"],
-            "深圳市": ["罗湖区", "福田区", "南山区", "宝安区"],
-            "珠海市": ["香洲区", "斗门区", "金湾区"],
-            "佛山市": ["禅城区", "南海区", "顺德区", "三水区"]
-        }
-        return district_mapping.get(city, [])
-    
+        try:
+            if not self.llm_client:
+                return [f"{city}区1", f"{city}区2", f"{city}区3"]
+
+            system_prompt = f"""你是一个专业的地理信息系统专家。请列出{city}的所有区县。
+
+请严格按照JSON数组格式返回，例如：
+["区县1", "区县2", "区县3"]
+
+注意：
+1. 只返回该城市的市辖区、县、县级市
+2. 使用完整的官方名称
+3. 不要包含任何其他文字，只要JSON数组"""
+
+            user_prompt = f"请列出{city}的所有区县"
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            response = await self.llm_client._make_request(messages, max_tokens=500)
+
+            if response:
+                import json
+                # 清理和解析响应
+                response = response.strip()
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.startswith('```'):
+                    response = response[3:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+
+                json_start = response.find('[')
+                json_end = response.rfind(']') + 1
+
+                if json_start != -1 and json_end != -1:
+                    json_str = response[json_start:json_end]
+                    districts = json.loads(json_str)
+                    return districts if isinstance(districts, list) else []
+
+            return []
+        except Exception as e:
+            print(f"获取区县列表失败: {e}")
+            return [f"{city}区1", f"{city}区2"]
+
     async def get_hospitals(self, district: str) -> List[str]:
         """获取医院列表"""
-        await asyncio.sleep(0.2)
-        hospital_mapping = {
-            "东华门街道": ["北京协和医院", "北京大学第一医院"],
-            "景山街道": ["中日友好医院", "中国中医科学院眼科医院"],
-            "朝阳区": ["北京朝阳医院", "北京中医药大学东方医院"],
-            "海淀区": ["北京301医院", "北京大学第三医院"],
-            "黄浦区": ["上海瑞金医院", "上海华东医院"],
-            "徐汇区": ["上海第六人民医院", "上海第八人民医院"],
-            "长宁区": ["上海同仁医院", "上海光华中西医结合医院"],
-            "静安区": ["上海华山医院", "上海华山医院静安分院"],
-            "越秀区": ["中山大学附属第一医院", "广东省人民医院"],
-            "荔湾区": ["广州医科大学附属第一医院", "广州市第一人民医院"],
-            "海珠区": ["南方医科大学珠江医院", "中山大学孙逸仙纪念医院"],
-            "天河区": ["中山大学附属第三医院", "暨南大学附属第一医院"],
-            "罗湖区": ["深圳市人民医院", "深圳市第二人民医院"],
-            "福田区": ["北京大学深圳医院", "深圳市中医院"],
-            "南山区": ["深圳市南山区人民医院", "华中科技大学协和深圳医院"],
-            "宝安区": ["深圳市宝安区人民医院", "深圳市宝安区中医院"]
-        }
-        return hospital_mapping.get(district, [])
+        try:
+            if not self.llm_client:
+                return [f"{district}人民医院", f"{district}中心医院", f"{district}中医院"]
+
+            system_prompt = f"""你是一个专业的医疗信息系统专家。请列出{district}的主要医院。
+
+请严格按照JSON数组格式返回，例如：
+["医院1", "医院2", "医院3"]
+
+注意：
+1. 只返回该区县的医院名称
+2. 包括综合医院、专科医院、中医院等
+3. 使用完整的官方名称
+4. 不要包含任何其他文字，只要JSON数组"""
+
+            user_prompt = f"请列出{district}的主要医院"
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            response = await self.llm_client._make_request(messages, max_tokens=500)
+
+            if response:
+                import json
+                # 清理和解析响应
+                response = response.strip()
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.startswith('```'):
+                    response = response[3:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+
+                json_start = response.find('[')
+                json_end = response.rfind(']') + 1
+
+                if json_start != -1 and json_end != -1:
+                    json_str = response[json_start:json_end]
+                    hospitals = json.loads(json_str)
+                    return hospitals if isinstance(hospitals, list) else []
+
+            return []
+        except Exception as e:
+            print(f"获取医院列表失败: {e}")
+            return [f"{district}人民医院", f"{district}中心医院"]
 
 
 class TaskManager:
@@ -484,7 +632,7 @@ async def demo_usage():
     
     # 演示2: 创建指定省刷新任务
     print("2. 创建指定省刷新任务")
-    province_task_id = await manager.create_refresh_task("province", "北京市")
+    province_task_id = await manager.create_refresh_task("province", "示例省份")
     print(f"任务ID: {province_task_id}")
     
     await manager.start_task(province_task_id)

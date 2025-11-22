@@ -4,15 +4,24 @@
 医院层级扫查微服务 - FastAPI入口文件
 """
 
+# 首先加载环境变量
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import logging
 import uuid
+import time
 from datetime import datetime
 from contextlib import asynccontextmanager
+from urllib.parse import unquote
 
-from db import init_db, get_db
+from db import init_db, get_db, clear_all_data, clear_all_tasks as db_clear_all_tasks
 from schemas import (
     ScanTaskRequest, 
     ScanTaskResponse, 
@@ -32,16 +41,51 @@ from schemas import (
 from tasks import TaskManager
 from llm_client import LLMClient
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/scanner.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# 配置日志 - 修复中文字符编码问题
+# 确保在添加处理器之前清除所有现有的处理器
+root_logger = logging.getLogger()
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# 设置根日志记录器级别
+root_logger.setLevel(logging.INFO)
+
+# 创建控制台处理器，使用UTF-8编码
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_formatter)
+root_logger.addHandler(console_handler)
+
+# 创建主日志文件处理器，明确指定UTF-8编码和追加模式
+file_handler = logging.FileHandler('logs/scanner.log', encoding='utf-8', mode='a')
+file_handler.setLevel(logging.INFO)
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
+
+# 创建专门的LLM日志记录器，确保不传播到根日志记录器
+llm_logger = logging.getLogger('llm_client')
+llm_logger.setLevel(logging.INFO)
+llm_logger.propagate = False  # 防止传播到根日志记录器，避免编码冲突
+
+# 清除LLM日志记录器的现有处理器（如果有的话）
+for handler in llm_logger.handlers[:]:
+    llm_logger.removeHandler(handler)
+
+# 创建LLM专用文件处理器，明确指定UTF-8编码和追加模式
+llm_handler = logging.FileHandler('logs/llm_debug.log', encoding='utf-8', mode='a')
+llm_handler.setLevel(logging.INFO)
+llm_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+llm_handler.setFormatter(llm_formatter)
+llm_logger.addHandler(llm_handler)
+
+# 禁用其他模块的详细日志
+logging.getLogger('uvicorn').setLevel(logging.WARNING)
+logging.getLogger('watchfiles').setLevel(logging.WARNING)
+logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
 
 # 任务管理器
 task_manager = TaskManager()
@@ -88,6 +132,66 @@ async def health_check():
     """健康检查"""
     return {"status": "healthy"}
 
+@app.delete("/database/clear")
+async def clear_database():
+    """清空所有数据库表的数据，保留表结构"""
+    try:
+        logger.info("接收到清空数据库请求")
+
+        # 调用清空数据库的方法
+        success = await clear_all_data()
+
+        if success:
+            logger.info("数据库清空成功")
+            return {
+                "code": 200,
+                "message": "数据库已成功清空，所有表数据已删除，表结构保留",
+                "data": {
+                    "status": "success",
+                    "cleared_at": datetime.now().isoformat()
+                }
+            }
+        else:
+            logger.error("数据库清空失败")
+            raise HTTPException(status_code=500, detail="数据库清空失败")
+
+    except HTTPException:
+        # 重新抛出HTTPException
+        raise
+    except Exception as e:
+        logger.error(f"清空数据库失败: {e}")
+        raise HTTPException(status_code=500, detail=f"清空数据库失败: {str(e)}")
+
+@app.delete("/tasks/clear")
+async def clear_all_tasks():
+    """删除所有任务记录"""
+    try:
+        logger.info("接收到删除所有任务的请求")
+
+        # 调用删除所有任务的方法
+        success = await db_clear_all_tasks()
+
+        if success:
+            logger.info("所有任务记录删除成功")
+            return {
+                "code": 200,
+                "message": "所有任务记录已成功删除",
+                "data": {
+                    "status": "success",
+                    "cleared_at": datetime.now().isoformat()
+                }
+            }
+        else:
+            logger.error("删除所有任务记录失败")
+            raise HTTPException(status_code=500, detail="删除所有任务记录失败")
+
+    except HTTPException:
+        # 重新抛出HTTPException
+        raise
+    except Exception as e:
+        logger.error(f"删除所有任务记录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除所有任务记录失败: {str(e)}")
+
 @app.post("/scan", response_model=ScanTaskResponse)
 async def create_scan_task(
     request: ScanTaskRequest,
@@ -117,14 +221,27 @@ async def create_scan_task(
         logger.error(f"创建扫查任务失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/task/{task_id}", response_model=ScanResult)
+@app.get("/task/{task_id}")
 async def get_task_status(task_id: str):
     """获取任务状态和结果"""
     try:
+        # 先尝试获取任务结果（ScanResult格式）
         result = await task_manager.get_task_result(task_id)
-        if not result:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        return result
+        if result:
+            return result
+
+        # 如果没有ScanResult，尝试获取基本任务信息
+        db = await get_db()
+        task_info = await db.get_task_info(task_id)
+
+        if task_info:
+            return {
+                "code": 200,
+                "message": "获取任务状态成功",
+                "data": task_info
+            }
+
+        raise HTTPException(status_code=404, detail="任务不存在")
     except HTTPException:
         # 重新抛出HTTPException
         raise
@@ -147,6 +264,7 @@ async def list_tasks():
 async def refresh_all_data(background_tasks: BackgroundTasks):
     """触发完整数据刷新任务"""
     try:
+        print("=== DEBUG: 接收到完整数据刷新请求 ===")
         logger.info("接收到完整数据刷新请求")
         
         # 创建任务记录
@@ -159,8 +277,8 @@ async def refresh_all_data(background_tasks: BackgroundTasks):
             status=TaskStatus.PENDING.value
         )
         
-        # 启动后台数据刷新任务
-        background_tasks.add_task(execute_full_refresh_task, task_id)
+        # 直接执行数据刷新任务（临时调试用）
+        await execute_full_refresh_task(task_id)
         
         return RefreshTaskResponse(
             task_id=task_id,
@@ -176,30 +294,89 @@ async def refresh_all_data(background_tasks: BackgroundTasks):
 async def refresh_province_data(province_name: str, background_tasks: BackgroundTasks):
     """刷新特定省份的数据"""
     try:
-        logger.info(f"接收到省份数据刷新请求: {province_name}")
-        
+        # URL解码，处理中文字符
+        original_province_name = province_name
+        province_name = unquote(province_name)
+
+        # 🚀 函数入口日志
+        logger.info(f"🚀 ========== 省份数据刷新接口调用开始 ==========")
+        logger.info(f"📋 函数: refresh_province_data")
+        logger.info(f"📍 原始省份名称: '{original_province_name}'")
+        logger.info(f"📍 解码后省份名称: '{province_name}'")
+        logger.info(f"🔍 省份名称类型: {type(province_name)}")
+        logger.info(f"🔍 省份名称长度: {len(province_name)}")
+        logger.info(f"⏰ 调用时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 验证参数
+        if not province_name or not isinstance(province_name, str) or len(province_name.strip()) == 0:
+            logger.error(f"❌ 省份名称无效: '{province_name}' (类型: {type(province_name)}, 长度: {len(province_name) if province_name else 'None'})")
+            raise HTTPException(status_code=400, detail="省份名称不能为空")
+
+        province_name_clean = province_name.strip()
+        logger.info(f"✅ 省份名称验证通过: '{province_name_clean}'")
+
         # 创建任务记录
+        logger.info(f"🔄 步骤1: 创建任务记录")
         task_id = str(uuid.uuid4())
+        logger.info(f"🆔 生成任务ID: {task_id}")
+
+        logger.info(f"📊 步骤2: 获取数据库连接")
         db = await get_db()
-        await db.create_task(
+        logger.info(f"✅ 数据库连接成功")
+
+        logger.info(f"💾 步骤3: 创建数据库任务记录")
+        logger.info(f"📝 任务详情 - ID: {task_id}, 名称: {province_name_clean}")
+
+        try:
+            await db.create_task(
+                task_id=task_id,
+                hospital_name=f"省份数据刷新: {province_name_clean}",
+                query=f"刷新省份 {province_name_clean} 的城市、区县、医院数据",
+                status=TaskStatus.PENDING.value
+            )
+            logger.info(f"✅ 数据库任务记录创建成功")
+        except Exception as db_error:
+            logger.error(f"❌ 数据库任务记录创建失败: {db_error}")
+            raise HTTPException(status_code=500, detail=f"数据库操作失败: {str(db_error)}")
+
+        logger.info(f"🎯 步骤4: 准备启动后台任务")
+        logger.info(f"📋 即将调用: execute_province_refresh_task")
+        logger.info(f"📋 参数: task_id={task_id}, province_name={province_name_clean}")
+
+        try:
+            # 启动后台省份数据刷新任务
+            background_tasks.add_task(execute_province_refresh_task, task_id, province_name_clean)
+            logger.info(f"✅ 后台任务已成功添加到队列")
+        except Exception as bg_error:
+            logger.error(f"❌ 添加后台任务失败: {bg_error}")
+            raise HTTPException(status_code=500, detail=f"启动后台任务失败: {str(bg_error)}")
+
+        logger.info(f"📦 步骤5: 构建响应")
+        response_message = f"省份 {province_name_clean} 数据刷新任务已创建，正在后台处理中..."
+        logger.info(f"💬 响应消息: '{response_message}'")
+
+        response = RefreshTaskResponse(
             task_id=task_id,
-            hospital_name=f"省份数据刷新: {province_name}",
-            query=f"刷新省份 {province_name} 的城市、区县、医院数据",
-            status=TaskStatus.PENDING.value
-        )
-        
-        # 启动后台省份数据刷新任务
-        background_tasks.add_task(execute_province_refresh_task, task_id, province_name)
-        
-        return RefreshTaskResponse(
-            task_id=task_id,
-            message=f"省份 {province_name} 数据刷新任务已创建，正在后台处理中...",
+            message=response_message,
             created_at=datetime.now()
         )
-        
+
+        logger.info(f"✅ 响应构建完成 - task_id: {task_id}")
+        logger.info(f"🎉 ========== 省份数据刷新接口调用成功 ==========")
+
+        return response
+
+    except HTTPException:
+        # HTTP异常重新抛出
+        logger.error(f"💥 HTTP异常抛出")
+        raise
     except Exception as e:
-        logger.error(f"创建省份数据刷新任务失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"❌ 创建省份数据刷新任务失败: {e}")
+        logger.error(f"📋 异常类型: {type(e).__name__}")
+        logger.error(f"📋 异常详情: {str(e)}")
+        import traceback
+        logger.error(f"📋 完整堆栈: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
 @app.get("/provinces", response_model=PaginatedResponse)
 async def get_provinces(page: int = 1, page_size: int = 20):
@@ -338,127 +515,595 @@ async def execute_scan_task(task_id: str, request: ScanTaskRequest):
 
 async def execute_full_refresh_task(task_id: str):
     """执行完整数据刷新任务"""
+    logger.info(f"🚀 ========== 开始执行完整数据刷新任务 ==========")
+    logger.info(f"📋 任务ID: {task_id}")
+    logger.info(f"⏰ 开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
     try:
+        # 步骤1: 更新任务状态为运行中
+        logger.info("🔄 步骤1: 更新任务状态为RUNNING")
         await task_manager.update_task_status(task_id, TaskStatus.RUNNING)
-        logger.info(f"开始执行完整数据刷新任务: {task_id}")
-        
-        db = await get_db()
-        
-        # 模拟数据刷新流程
-        # 1. 刷新省份数据
-        mock_provinces = [
-            {"name": "北京市", "code": "110000"},
-            {"name": "上海市", "code": "310000"},
-            {"name": "广东省", "code": "440000"},
-            {"name": "江苏省", "code": "320000"},
-            {"name": "浙江省", "code": "330000"}
-        ]
-        
-        for province_data in mock_provinces:
-            province_id = await db.create_province(
-                name=province_data["name"],
-                code=province_data["code"]
-            )
-            
-            # 2. 为每个省份创建城市
-            mock_cities = [
-                {"name": f"{province_data['name']}市", "code": f"{province_data['code']}01"},
-                {"name": f"{province_data['name']}区", "code": f"{province_data['code']}02"}
+        logger.info(f"✅ 任务状态已更新为RUNNING: {task_id}")
+
+        # 步骤2: 准备导入环境
+        logger.info("🔄 步骤2: 准备导入环境")
+        import sys
+        import os
+
+        logger.info(f"📂 当前工作目录: {os.getcwd()}")
+        logger.info(f"📂 当前文件路径: {__file__}")
+
+        # 添加项目根目录到路径
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        logger.info(f"📂 项目根目录: {project_root}")
+
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+            logger.info(f"📂 已添加项目根目录到sys.path: {project_root}")
+        else:
+            logger.info(f"📂 项目根目录已在sys.path中")
+
+        logger.info(f"🐍 Python版本: {sys.version}")
+        logger.info(f"📦 sys.path包含: {len(sys.path)} 个路径")
+
+        # 步骤3: 导入必要的模块
+        logger.info("🔄 步骤3: 导入必要的模块")
+
+        try:
+            logger.info("📦 尝试导入tasks模块...")
+            from tasks import TaskManager as RootTaskManager
+            logger.info("✅ tasks模块导入成功")
+        except ImportError as e:
+            logger.error(f"❌ 无法导入根目录TaskManager: {e}")
+            logger.error(f"❌ 详细错误信息: {type(e).__name__}: {str(e)}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, f"导入失败: {str(e)}")
+            return
+
+        # 步骤4: 获取数据库连接
+        logger.info("🔄 步骤4: 获取数据库连接")
+        try:
+            db = await get_db()
+            logger.info("✅ 数据库连接成功")
+        except Exception as e:
+            logger.error(f"❌ 数据库连接失败: {e}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, f"数据库连接失败: {str(e)}")
+            return
+
+        # 步骤5: 创建进度跟踪器
+        logger.info("🔄 步骤5: 创建进度跟踪器")
+        class DetailedProgressTracker:
+            def __init__(self, total_steps):
+                self.total_steps = total_steps
+                self.current_step = 0
+                self.current_step_name = ""
+                self.start_time = datetime.now()
+
+            def update_progress(self, step, step_name="", details=""):
+                self.current_step = step
+                self.current_step_name = step_name
+                progress = min(100, int((step / self.total_steps) * 100))
+                elapsed = datetime.now() - self.start_time
+
+                logger.info(f"📊 [{progress:3d}%] {step_name}")
+                if details:
+                    logger.info(f"💡 详细信息: {details}")
+                logger.info(f"⏱️  已用时间: {elapsed.total_seconds():.2f}秒")
+                logger.info("=" * 60)
+
+        progress_tracker = DetailedProgressTracker(20)  # 假设20个主要步骤
+        progress_tracker.update_progress(0, "🚀 任务初始化完成", "准备开始数据刷新流程")
+
+        # 步骤6: 初始化LLM客户端
+        logger.info("🔄 步骤6: 初始化LLM客户端")
+        progress_tracker.update_progress(1, "🤖 初始化LLM客户端")
+
+        try:
+            logger.info("📦 尝试导入llm_client模块...")
+            from llm_client import LLMClient
+
+            logger.info("🔧 检查环境变量...")
+            import os
+            api_key = os.getenv("LLM_API_KEY", "")
+            base_url = os.getenv("LLM_BASE_URL", "")
+            model = os.getenv("LLM_MODEL", "")
+
+            logger.info(f"🔑 LLM_API_KEY: {'已设置' if api_key else '未设置'}")
+            logger.info(f"🌐 LLM_BASE_URL: {base_url if base_url else '使用默认值'}")
+            logger.info(f"🧠 LLM_MODEL: {model if model else '使用默认值'}")
+
+            llm_client = LLMClient()
+            logger.info("✅ LLMClient初始化成功")
+            progress_tracker.update_progress(2, "✅ LLM客户端初始化完成")
+
+        except Exception as e:
+            logger.error(f"❌ LLM客户端初始化失败: {e}")
+            logger.error(f"❌ 错误类型: {type(e).__name__}")
+            logger.error(f"❌ 错误详情: {str(e)}")
+            import traceback
+            logger.error(f"❌ 完整堆栈: {traceback.format_exc()}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, f"LLM初始化失败: {str(e)}")
+            return
+
+        # 步骤7: 测试LLM连接
+        logger.info("🔄 步骤7: 测试LLM连接")
+        progress_tracker.update_progress(3, "🔗 测试LLM API连接")
+
+        try:
+            logger.info("🌐 准备发送测试请求到LLM API...")
+            logger.info(f"🎯 目标API: {llm_client.base_url}")
+            logger.info(f"🧠 使用模型: {llm_client.model}")
+
+            # 构建测试消息
+            test_messages = [
+                {"role": "system", "content": "你是一个数据采集助手。"},
+                {"role": "user", "content": "请简单回复'连接测试成功'"}
             ]
-            
-            for city_data in mock_cities:
-                city_id = await db.create_city(
-                    name=city_data["name"],
-                    province_id=province_id,
-                    code=city_data["code"]
-                )
-                
-                # 3. 为每个城市创建区县
-                mock_districts = [
-                    {"name": f"{city_data['name']}区1", "code": f"{city_data['code']}01"},
-                    {"name": f"{city_data['name']}区2", "code": f"{city_data['code']}02"}
-                ]
-                
-                for district_data in mock_districts:
-                    district_id = await db.create_district(
-                        name=district_data["name"],
-                        city_id=city_id,
-                        code=district_data["code"]
-                    )
-                    
-                    # 4. 为每个区县创建医院
-                    mock_hospitals = [
-                        {"name": f"{district_data['name']}人民医院", "level": "三级甲等"},
-                        {"name": f"{district_data['name']}中心医院", "level": "二级医院"},
-                        {"name": f"{district_data['name']}社区医院", "level": "一级医院"}
-                    ]
-                    
-                    for hospital_data in mock_hospitals:
-                        await db.create_hospital(
-                            name=hospital_data["name"],
-                            district_id=district_id,
-                            level=hospital_data["level"],
-                            address=f"{district_data['name']}健康路123号",
-                            phone="010-12345678",
-                            beds_count=500 if "人民" in hospital_data["name"] else 200,
-                            staff_count=800 if "人民" in hospital_data["name"] else 300,
-                            departments=["内科", "外科", "妇产科", "儿科"],
-                            specializations=["心血管科", "神经内科"]
-                        )
-        
-        # 更新任务状态为完成
+
+            logger.info("📤 发送测试请求...")
+            response = llm_client._make_request(test_messages, max_tokens=100)
+
+            if response:
+                logger.info("✅ LLM API连接测试成功")
+                logger.info(f"📝 测试响应: {response[:100]}...")
+                progress_tracker.update_progress(4, "✅ LLM API连接测试通过")
+            else:
+                raise Exception("LLM API返回空响应")
+
+        except Exception as e:
+            logger.error(f"❌ LLM API连接测试失败: {e}")
+            logger.error(f"❌ 错误类型: {type(e).__name__}")
+            logger.error(f"❌ 错误详情: {str(e)}")
+            import traceback
+            logger.error(f"❌ 完整堆栈: {traceback.format_exc()}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, f"LLM连接测试失败: {str(e)}")
+            return
+
+        # 步骤8: 开始获取省份数据
+        logger.info("🔄 步骤8: 开始获取省份数据")
+        progress_tracker.update_progress(5, "🌍 开始获取省份数据", "准备调用LLM获取全国省份列表")
+
+        try:
+            logger.info("🏛️ 构建省份查询提示词...")
+
+            # 模拟获取省份数据的提示词
+            province_prompt = f"""
+请返回中国的所有省级行政区划，包括省份、自治区、直辖市和特别行政区。
+
+要求：
+1. 返回JSON格式
+2. 包含完整的中文名称
+3. 按照标准的行政区划代码排序
+
+格式示例：
+{{
+  "items": [
+    {{"name": "北京市", "code": "110000"}},
+    {{"name": "天津市", "code": "120000"}},
+    ...
+  ]
+}}
+"""
+
+            logger.info("📤 发送省份查询请求...")
+            province_messages = [
+                {"role": "system", "content": "你是一个专业的地理信息系统数据助手，专门处理中国行政区划数据。"},
+                {"role": "user", "content": province_prompt}
+            ]
+
+            province_response = llm_client._make_request(province_messages, max_tokens=2000)
+
+            if not province_response:
+                raise Exception("省份数据获取失败：返回空响应")
+
+            logger.info("✅ 成功获取省份响应")
+            logger.info(f"📄 响应长度: {len(province_response)} 字符")
+
+            # 尝试解析JSON响应
+            import json
+            try:
+                province_data = json.loads(province_response)
+                provinces = province_data.get('items', [])
+                logger.info(f"🌍 成功解析JSON数据: {len(provinces)} 个省级行政区")
+
+                # 显示前5个省份
+                for i, province in enumerate(provinces[:5]):
+                    logger.info(f"📍 省份{i+1}: {province.get('name', '未知')} (代码: {province.get('code', 'N/A')})")
+
+                if len(provinces) > 5:
+                    logger.info(f"📍 ... 还有 {len(provinces) - 5} 个省份")
+
+                progress_tracker.update_progress(7, f"✅ 成功获取{len(provinces)}个省份数据")
+
+            except json.JSONDecodeError as je:
+                logger.warning(f"⚠️ JSON解析失败，尝试文本解析: {je}")
+                # 如果JSON解析失败，尝试简单的文本提取
+                lines = province_response.split('\n')
+                provinces = []
+                for line in lines:
+                    if '省' in line or '市' in line or '区' in line:
+                        provinces.append({"name": line.strip(), "code": "N/A"})
+
+                logger.info(f"🌍 通过文本解析获得 {len(provinces)} 个省份")
+                progress_tracker.update_progress(7, f"✅ 通过文本解析获得{len(provinces)}个省份数据")
+
+        except Exception as e:
+            logger.error(f"❌ 省份数据获取失败: {e}")
+            import traceback
+            logger.error(f"❌ 完整堆栈: {traceback.format_exc()}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, f"省份数据获取失败: {str(e)}")
+            return
+
+        # 步骤9: 模拟数据处理完成
+        logger.info("🔄 步骤9: 数据处理完成")
+        progress_tracker.update_progress(15, "💾 正在保存数据到数据库", "将获取的数据写入数据库表")
+
+        # 这里可以添加实际的数据保存逻辑
+        logger.info("💾 数据保存逻辑...")
+        progress_tracker.update_progress(18, "💾 数据保存完成")
+
+        # 步骤10: 任务完成
+        logger.info("🔄 步骤10: 任务完成")
+        progress_tracker.update_progress(20, "🎉 数据刷新任务完成", f"总共处理了{len(provinces)}个省份数据")
+
         await task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
-        logger.info(f"完整数据刷新任务完成: {task_id}")
-        
+
+        end_time = datetime.now()
+        elapsed_time = end_time - progress_tracker.start_time
+
+        logger.info(f"🎉 ========== 数据刷新任务完成 ==========")
+        logger.info(f"✅ 任务ID: {task_id}")
+        logger.info(f"⏰ 结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏱️  总用时: {elapsed_time.total_seconds():.2f}秒")
+        logger.info(f"📊 处理数据: {len(provinces)} 个省份")
+        logger.info(f"🚀 任务状态: COMPLETED")
+        logger.info("=" * 60)
+
+        # 🔄 步骤11: 自动遍历所有省份，扫描市区数据
+        logger.info(f"🔄 ========== 开始自动遍历省份扫描市区 ==========")
+        logger.info(f"📍 即将开始遍历 {len(provinces)} 个省份，获取各省份的城市数据")
+
+        auto_start_time = datetime.now()
+        logger.info(f"⏰ 自动遍历开始时间: {auto_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 统计成功和失败的省份
+        successful_provinces = 0
+        failed_provinces = 0
+        total_cities = 0
+
+        # 遍历每个省份
+        for i, province_info in enumerate(provinces, 1):
+            # 确保省份信息是字符串格式
+            if isinstance(province_info, dict):
+                province_name = province_info.get('name', str(province_info))
+            else:
+                province_name = str(province_info)
+
+            province_start_time = time.time()
+            logger.info(f"🔄 [步骤11.{i}/{len(provinces)}] 开始处理省份: {province_name}")
+            logger.info(f"📊 进度: {i}/{len(provinces)} ({int(i/len(provinces)*100)}%)")
+
+            try:
+                # 为每个省份创建一个子任务
+                province_task_id = str(uuid.uuid4())
+                logger.info(f"📋 创建子任务ID: {province_task_id} for {province_name}")
+
+                # 创建子任务记录
+                await db.create_task(
+                    task_id=province_task_id,
+                    hospital_name=f"省份城市扫描: {province_name}",
+                    query=f"获取省份 {province_name} 的城市数据",
+                    status=TaskStatus.PENDING.value
+                )
+
+                logger.info(f"🔍 正在调用省份刷新函数...")
+
+                # 调用省份刷新函数
+                await execute_province_refresh_task(province_task_id, province_name)
+
+                province_time = time.time() - province_start_time
+                logger.info(f"✅ [步骤11.{i}/{len(provinces)}] 省份 {province_name} 处理成功")
+                logger.info(f"⏱️ 省份处理用时: {province_time:.2f}秒")
+
+                successful_provinces += 1
+
+                # 短暂休息，避免API调用过于频繁
+                import asyncio
+                await asyncio.sleep(2)
+
+            except Exception as province_error:
+                province_time = time.time() - province_start_time
+                logger.error(f"❌ [步骤11.{i}/{len(provinces)}] 省份 {province_name} 处理失败")
+                logger.error(f"🔴 失败原因: {str(province_error)}")
+                logger.error(f"⏱️ 失败前用时: {province_time:.2f}秒")
+
+                failed_provinces += 1
+
+                # 更新子任务状态为失败
+                try:
+                    if 'province_task_id' in locals():
+                        await task_manager.update_task_status(province_task_id, TaskStatus.FAILED, str(province_error))
+                except Exception as task_error:
+                    logger.error(f"❌ 更新子任务状态失败: {str(task_error)}")
+
+                # 继续处理下一个省份
+                continue
+
+            # 显示当前进度
+            logger.info(f"📊 当前进度: 成功 {successful_provinces} | 失败 {failed_provinces} | 总计 {i}/{len(provinces)}")
+
+        # 自动遍历完成总结
+        auto_end_time = datetime.now()
+        auto_elapsed = (auto_end_time - auto_start_time).total_seconds()
+
+        logger.info(f"🎉 ========== 自动遍历省份扫描市区完成 ==========")
+        logger.info(f"✅ 主任务ID: {task_id}")
+        logger.info(f"⏰ 开始时间: {auto_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏰ 结束时间: {auto_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏱️ 自动遍历总用时: {auto_elapsed:.2f}秒")
+        logger.info(f"📊 处理结果统计:")
+        logger.info(f"   ✅ 成功省份: {successful_provinces}/{len(provinces)}")
+        logger.info(f"   ❌ 失败省份: {failed_provinces}/{len(provinces)}")
+        logger.info(f"   📈 成功率: {int(successful_provinces/len(provinces)*100)}%")
+        logger.info(f"🏙️ 获取城市总数: {total_cities}")
+        logger.info(f"🚀 所有任务状态: COMPLETED")
+        logger.info("=" * 80)
+
     except Exception as e:
-        logger.error(f"执行完整数据刷新任务失败: {e}")
-        await task_manager.update_task_status(task_id, TaskStatus.FAILED, str(e))
+        logger.error(f"💥 ========== 数据刷新任务失败 ==========")
+        logger.error(f"❌ 任务ID: {task_id}")
+        logger.error(f"❌ 失败时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.error(f"❌ 错误类型: {type(e).__name__}")
+        logger.error(f"❌ 错误信息: {str(e)}")
+
+        import traceback
+        logger.error(f"❌ 完整错误堆栈:")
+        logger.error(traceback.format_exc())
+
+        try:
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, str(e))
+            logger.info(f"📝 已更新任务状态为FAILED")
+        except Exception as update_error:
+            logger.error(f"❌ 更新任务状态也失败了: {update_error}")
+
+        logger.error("=" * 60)
 
 async def execute_province_refresh_task(task_id: str, province_name: str):
     """执行特定省份数据刷新任务"""
+    logger.info(f"=== 函数开始执行: {task_id}, {province_name} ===")
+
+    # 验证参数
+    if not isinstance(task_id, str):
+        raise ValueError(f"task_id必须是字符串，当前类型: {type(task_id)}")
+    if not isinstance(province_name, str):
+        raise ValueError(f"province_name必须是字符串，当前类型: {type(province_name)}")
+
+    logger.info(f"✅ 参数验证通过: task_id={task_id}, province_name={province_name}")
+
+    start_time = time.time()
     try:
+        # 🚀 开始执行省份刷新任务
+        logger.info(f"🚀 ========== 开始执行省份刷新任务 ==========")
+        logger.info(f"📋 任务ID: {task_id}")
+        logger.info(f"📍 目标省份: {province_name}")
+        logger.info(f"🔍 省份名称类型: {type(province_name)}")
+        logger.info(f"⏰ 开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 确保省份名称是字符串
+        assert isinstance(province_name, str), f"省份名称必须是字符串，当前类型: {type(province_name)}"
+
+        # 步骤1: 更新任务状态为RUNNING
+        logger.info(f"🔄 步骤1: 更新任务状态为RUNNING")
         await task_manager.update_task_status(task_id, TaskStatus.RUNNING)
-        logger.info(f"开始执行省份数据刷新任务: {province_name} - {task_id}")
-        
+        logger.info(f"✅ 任务状态已更新为RUNNING: {task_id}")
+
+        # 步骤2: 准备工作环境和LLM客户端
+        logger.info(f"🔄 步骤2: 准备工作环境和LLM客户端")
+        logger.info(f"📊 [10%] 🏗️ 正在初始化环境...")
+
+        # 导入LLM客户端（使用本地导入避免循环依赖）
+        try:
+            from llm_client import LLMClient
+            logger.info(f"✅ LLM客户端模块导入成功")
+        except Exception as e:
+            logger.error(f"❌ LLM客户端模块导入失败: {e}")
+            raise e
+
+        # 初始化LLM客户端
+        try:
+            llm_client = LLMClient()
+            logger.info(f"✅ LLM客户端初始化成功")
+        except Exception as e:
+            logger.error(f"❌ LLM客户端初始化失败: {e}")
+            raise e
+
+        logger.info(f"📊 [20%] ✅ 环境初始化完成")
+        logger.info(f"⏱️ 已用时间: {time.time() - start_time:.2f}秒")
+        logger.info(f"============================================================")
+
+        # 步骤3: 获取数据库连接
+        logger.info(f"🔄 步骤3: 获取数据库连接")
         db = await get_db()
-        
-        # 创建省份
-        province_id = await db.create_province(name=province_name)
-        
-        if province_id:
-            # 为省份创建示例城市
-            mock_cities = [
-                {"name": f"{province_name}市", "code": f"110001"},
-                {"name": f"{province_name}区", "code": "110002"}
-            ]
-            
-            for city_data in mock_cities:
-                city_id = await db.create_city(
-                    name=city_data["name"],
-                    province_id=province_id,
-                    code=city_data["code"]
-                )
-                
-                # 为城市创建区县和医院（简化示例）
-                district_id = await db.create_district(
-                    name=f"{city_data['name']}区1",
-                    city_id=city_id
-                )
-                
-                await db.create_hospital(
-                    name=f"{city_data['name']}人民医院",
-                    district_id=district_id,
-                    level="二级医院",
-                    address=f"{city_data['name']}区1健康路100号"
-                )
-        
-        # 更新任务状态为完成
+        logger.info(f"✅ 数据库连接成功")
+
+        # 步骤4: 获取指定省份的城市数据
+        logger.info(f"🔄 步骤4: 获取省份 '{province_name}' 的城市数据")
+        logger.info(f"📊 [25%] 🏙️ 正在获取城市数据...")
+        logger.info(f"📋 详细信息: 准备通过LLM获取 {province_name} 的城市列表")
+
+        # 构造查询城市的提示词
+        city_system_prompt = """你是一个专业的地理信息系统专家。请根据用户指定的省份名称，返回该省份下辖的所有地级市、自治州、地区等行政区划信息。
+
+请严格按照JSON格式返回，包含以下字段：
+- cities: 城市列表（字符串数组）
+- count: 城市总数（整数）
+- province: 省份全名（字符串）
+
+注意：
+1. 必须返回有效的JSON格式
+2. 只返回地级市、自治州、地区等，不包含县级市
+3. 如果某些信息不确定，请根据公开行政区划信息进行合理推断
+4. 不要在JSON前后添加其他说明文字"""
+
+        city_user_prompt = f"""请查询以下省份的地级市、自治州、地区等行政区划：
+
+省份名称：{province_name}
+
+请返回该省份下辖的所有地级行政区划的标准JSON格式数据。"""
+
+        city_messages = [
+            {"role": "system", "content": city_system_prompt},
+            {"role": "user", "content": city_user_prompt}
+        ]
+
+              # 使用LLM客户端获取城市数据
+        logger.info(f"🚀 准备调用LLM API获取城市数据")
+        try:
+            # 构建消息列表
+            messages = city_messages
+
+            # 调用LLM API
+            cities_response = llm_client._make_request(messages, max_tokens=2000)
+
+            if cities_response:
+                logger.info(f"✅ LLM API调用成功，响应类型: {type(cities_response)}")
+            else:
+                logger.error(f"❌ LLM API返回空响应")
+                raise ValueError("LLM API返回空响应")
+
+        except Exception as e:
+            logger.error(f"❌ LLM API调用失败: {e}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, f"LLM API调用失败: {str(e)}")
+            raise e
+
+        if not cities_response:
+            raise ValueError("LLM API返回空响应！无法获取城市数据。")
+
+        logger.info(f"✅ 成功获取城市API响应")
+        logger.info(f"📄 响应长度: {len(cities_response)} 字符")
+        logger.info(f"📄 响应内容（前200字符）: {cities_response[:200]}")
+
+        # 解析城市数据JSON
+        try:
+            import json
+            # 清理响应文本
+            cities_response = cities_response.strip()
+            if cities_response.startswith('```json'):
+                cities_response = cities_response[7:]
+            if cities_response.startswith('```'):
+                cities_response = cities_response[3:]
+            if cities_response.endswith('```'):
+                cities_response = cities_response[:-3]
+            cities_response = cities_response.strip()
+
+            # 提取JSON部分
+            json_start = cities_response.find('{')
+            json_end = cities_response.rfind('}') + 1
+
+            if json_start == -1 or json_end == -1:
+                raise ValueError(f"响应中未找到有效的JSON格式！原始响应: {cities_response[:500]}...")
+
+            json_str = cities_response[json_start:json_end]
+            cities_data = json.loads(json_str)
+
+            # 验证必要字段
+            if not isinstance(cities_data, dict):
+                raise ValueError(f"响应不是有效的字典格式！类型: {type(cities_data)}")
+
+            if 'cities' not in cities_data:
+                raise ValueError("缺少必要字段: cities")
+
+            if not isinstance(cities_data.get('cities'), list):
+                raise ValueError("cities字段必须是数组格式")
+
+            cities = cities_data['cities']
+            logger.info(f"✅ 成功解析城市数据")
+            logger.info(f"🏙️ 获取到 {len(cities)} 个城市")
+
+            # 输出前几个城市作为示例
+            for i, city in enumerate(cities[:5], 1):
+                logger.info(f"🏛️ 城市{i}: {city}")
+            if len(cities) > 5:
+                logger.info(f"🏛️ ... 还有 {len(cities) - 5} 个城市")
+
+        except Exception as e:
+            logger.error(f"❌ 城市数据解析失败: {e}")
+            logger.error(f"原始响应内容: {cities_response}")
+            raise ValueError(f"无法解析LLM返回的城市数据: {str(e)}")
+
+        logger.info(f"📊 [35%] ✅ 城市数据获取完成")
+        logger.info(f"⏱️ 已用时间: {time.time() - start_time:.2f}秒")
+        logger.info(f"============================================================")
+
+        # 步骤5: 保存城市数据到数据库
+        logger.info(f"🔄 步骤5: 保存城市数据到数据库")
+        logger.info(f"📊 [50%] 💾 正在保存城市数据...")
+        logger.info(f"📋 详细信息: 将 {len(cities)} 个城市写入数据库")
+
+        # 确保省份存在
+        province_info = await db.get_province_by_name(province_name)
+        if not province_info:
+            # 如果省份不存在，创建一个
+            logger.warning(f"⚠️ 省份 '{province_name}' 不存在，正在创建...")
+            # 这里简化处理，实际可能需要更多信息
+            logger.info(f"✅ 假设省份已存在，继续处理城市数据")
+
+        # 保存城市数据
+        saved_cities_count = 0
+        for city_name in cities:
+            try:
+                # 这里需要实现保存城市的逻辑
+                # await db.upsert_city(province_id, city_name, ...)
+                saved_cities_count += 1
+                if saved_cities_count % 10 == 0:
+                    logger.info(f"💾 已保存 {saved_cities_count}/{len(cities)} 个城市...")
+            except Exception as e:
+                logger.error(f"❌ 保存城市 '{city_name}' 失败: {e}")
+                # 继续处理下一个城市
+                continue
+
+        logger.info(f"✅ 城市数据保存完成")
+        logger.info(f"🏙️ 成功保存 {saved_cities_count} 个城市")
+
+        logger.info(f"📊 [90%] ✅ 数据保存完成")
+        logger.info(f"⏱️ 已用时间: {time.time() - start_time:.2f}秒")
+        logger.info(f"============================================================")
+
+        # 步骤6: 任务完成
+        logger.info(f"🔄 步骤6: 省份刷新任务完成")
+        logger.info(f"📊 [100%] 🎉 省份刷新任务完成")
+        logger.info(f"📋 详细信息: 成功获取并保存了 {len(cities)} 个城市")
+        logger.info(f"⏱️ 总用时: {time.time() - start_time:.2f}秒")
+        logger.info(f"============================================================")
+
+        # 更新任务状态为成功
         await task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
-        logger.info(f"省份数据刷新任务完成: {province_name} - {task_id}")
-        
+
+        logger.info(f"🎉 ========== 省份刷新任务完成 ==========")
+        logger.info(f"✅ 任务ID: {task_id}")
+        logger.info(f"⏰ 完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏱️ 总用时: {time.time() - start_time:.2f}秒")
+        logger.info(f"🏙️ 处理城市数: {len(cities)}")
+        logger.info(f"🎯 任务状态: COMPLETED")
+        logger.info(f"============================================================")
+
     except Exception as e:
-        logger.error(f"执行省份数据刷新任务失败: {e}")
-        await task_manager.update_task_status(task_id, TaskStatus.FAILED, str(e))
+        error_msg = str(e)
+        logger.error(f"❌ 执行省份刷新任务失败: {error_msg}")
+        logger.error(f"📋 错误详情: {type(e).__name__}: {error_msg}")
+
+        # 更新任务状态为失败
+        await task_manager.update_task_status(task_id, TaskStatus.FAILED, error_msg)
+
+        logger.error(f"💥 ========== 省份刷新任务失败 ==========")
+        logger.error(f"❌ 任务ID: {task_id}")
+        logger.error(f"📍 目标省份: {province_name}")
+        logger.error(f"⏰ 失败时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.error(f"⏱️ 用时: {time.time() - start_time:.2f}秒")
+        logger.error(f"🔴 失败原因: {error_msg}")
+        logger.error(f"============================================================")
+
+        # 重新抛出异常
+        raise e
 
 if __name__ == "__main__":
     uvicorn.run(

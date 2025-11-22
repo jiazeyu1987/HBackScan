@@ -16,6 +16,44 @@ This is a **Hospital Hierarchy Scanner Microservice** (医院层级扫查微服�
 4. **Task Management** (`tasks.py`): Asynchronous task system with progress tracking
 5. **Data Models** (`schemas.py`): Pydantic models for request/response validation
 
+### Project Structure
+
+The project follows a dual-directory structure with comprehensive testing infrastructure:
+
+```
+HBackScan/
+├── code/hospital_scanner/          # Main application code
+│   ├── main.py                     # FastAPI application entry (39KB)
+│   ├── db.py                       # Database operations layer (32KB)
+│   ├── llm_client.py               # DashScope LLM integration (14KB)
+│   ├── tasks.py                    # Async task management system (25KB)
+│   ├── schemas.py                  # Pydantic data models (11KB)
+│   ├── start_frontend.py           # Frontend launcher script
+│   ├── frontend/                   # Web frontend interface
+│   │   └── scanner_test.html       # HTML test interface (47KB)
+│   └── tests/                      # Source-code-level tests
+├── tests/                          # Root-level test suite
+│   ├── conftest.py                 # Root-level test fixtures (19KB)
+│   ├── helpers.py                  # Test utility functions
+│   └── test_*.py                   # Contract, acceptance, integration tests
+├── config/                         # Configuration files (Redis, etc.)
+├── data/                           # Database storage
+├── logs/                           # Application logs
+├── docs/                           # Comprehensive documentation
+├── examples/                       # Usage examples
+├── reports/                        # Test reports and documentation
+└── deployment files                # Docker, scripts, etc.
+```
+
+### Frontend Interface
+
+The project includes a modern web-based frontend with Chinese localization:
+
+- **HTML Interface**: `code/hospital_scanner/frontend/scanner_test.html`
+- **Launcher Script**: `start_frontend.py` - automatically opens browser
+- **Features**: Real-time status monitoring, modern UI, result visualization
+- **Access**: Run `python start_frontend.py` from the `code/hospital_scanner` directory
+
 ### Data Hierarchy
 ```
 Province (省份)
@@ -55,20 +93,30 @@ make db-init
 
 **Development Mode:**
 ```bash
+# Navigate to main application directory
+cd code/hospital_scanner
+
 # Using uvicorn directly
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
-# Using the start script
+# Using the start script (from project root)
 chmod +x start.sh
 ./start.sh
 
-# Using Makefile
+# Using Makefile (from project root)
 make start
+
+# Launch frontend interface (from code/hospital_scanner)
+python start_frontend.py
 ```
 
 **Docker Mode:**
 ```bash
-# Using Docker Compose
+# From project root - basic Docker setup
+docker-compose up -d
+
+# From code/hospital_scanner - full service stack
+cd code/hospital_scanner
 docker-compose up -d
 
 # Production deployment
@@ -109,8 +157,11 @@ make clean              # Clean generated files
 
 ### Single Test Execution
 ```bash
-# Run specific test file
+# Run specific test file (from project root)
 pytest tests/test_main.py -v
+
+# Run specific test file (from code/hospital_scanner)
+pytest code/hospital_scanner/tests/test_main.py -v
 
 # Run specific test function
 pytest tests/test_main.py::test_health_check -v
@@ -240,37 +291,69 @@ MAX_CONCURRENT_TASKS=5
 - Semaphore-based concurrency control
 
 ### Testing Strategy
+
+**Dual Test Structure:**
+- **Root-level tests** (`tests/`): Contract tests, acceptance tests, integration tests
+- **Source-level tests** (`code/hospital_scanner/tests/`): Unit tests, API integration tests
+
+**Test Types:**
 - Unit tests for individual components
 - Integration tests for API endpoints
 - Acceptance tests for complete workflows
+- Contract tests for API consistency
+- Performance tests for load testing
 - Mock LLM responses for reliable testing
 - Database fixtures for consistent test data
+
+**Test Categories (pytest.ini):**
+- `unit`: Individual component tests
+- `integration`: System integration tests
+- `acceptance`: End-to-end workflow tests
+- `performance`: Load and stress tests
+- `fast`: Quick tests for development
+- `slow`: Comprehensive tests that take longer
+- `contract`: API contract validation tests
+- `database`: Database-dependent tests
+- `network`: Tests requiring network access
+- `api`: API-related tests
+- `llm`: LLM-related tests
+- `mock`: Tests using mock data
+- `smoke`: Quick validation tests
+- `regression`: Regression tests
+- `security`: Security tests
+- `schema`: Schema validation tests
 
 ## Important Files
 
 ### Core Application
-- `main.py` - FastAPI application and routing
-- `db.py` - Database operations and management
-- `llm_client.py` - DashScope LLM integration
-- `tasks.py` - Async task management system
-- `schemas.py` - Pydantic data models
+- `code/hospital_scanner/main.py` - FastAPI application and routing
+- `code/hospital_scanner/db.py` - Database operations and management
+- `code/hospital_scanner/llm_client.py` - DashScope LLM integration
+- `code/hospital_scanner/tasks.py` - Async task management system
+- `code/hospital_scanner/schemas.py` - Pydantic data models
+- `code/hospital_scanner/start_frontend.py` - Frontend launcher script
+- `code/hospital_scanner/frontend/scanner_test.html` - Web-based test interface
 
 ### Configuration & Deployment
 - `.env.example` - Environment variable template
 - `docker-compose.yml` - Development Docker setup
 - `docker-compose.prod.yml` - Production Docker setup
 - `Dockerfile` - Container image definition
-- `Makefile` - Development commands and utilities
+- `Makefile` - Development commands and utilities with colorized output
+- `pytest.ini` - Comprehensive pytest configuration with coverage and markers
 
 ### Testing
-- `pytest.ini` - Pytest configuration with coverage
-- `tests/` - Test suite directory
-- `conftest.py` - Test fixtures and configuration
+- `tests/` - Root-level test suite (contract, acceptance, integration)
+- `code/hospital_scanner/tests/` - Source-level test suite (unit, API integration)
+- `tests/conftest.py` - Root-level test fixtures and configuration (19KB)
+- `tests/helpers.py` - Test utility functions
+- `requirements-dev.txt` - Comprehensive development dependencies (195 lines)
 
 ### Scripts
 - `start.sh` - Development server startup
 - `deploy.sh` - Production deployment automation
 - `install.sh` - System service installation
+- `backup.sh` - Database backup utilities
 
 ## Troubleshooting
 
@@ -287,11 +370,20 @@ curl http://localhost:8000/health
 
 # View application logs
 docker-compose logs -f
+tail -f logs/scanner.log
 tail -f logs/ai_debug.log
 
 # Database inspection
 sqlite3 data/hospitals.db ".tables"
 sqlite3 data/hospitals.db "SELECT COUNT(*) FROM hospital;"
+
+# Test frontend interface
+cd code/hospital_scanner
+python start_frontend.py
+
+# Run specific component tests
+pytest code/hospital_scanner/tests/test_llm_client.py -v -s
+pytest tests/test_contracts.py -v
 ```
 
 ### Performance Monitoring
@@ -299,3 +391,31 @@ sqlite3 data/hospitals.db "SELECT COUNT(*) FROM hospital;"
 - Database query optimization with indexes
 - Concurrent task limiting to prevent API rate limiting
 - Comprehensive logging for performance analysis
+- Frontend real-time status updates and result visualization
+- Health check endpoints for monitoring system status
+
+## Testing Infrastructure
+
+The project has a sophisticated testing setup with extensive configuration:
+
+### Test Configuration (pytest.ini)
+- Comprehensive marker system for test categorization
+- Coverage reporting with HTML and XML output
+- Configurable log levels and output formats
+- Performance tracking with duration reporting
+- Branch coverage analysis with 80% minimum threshold
+
+### Test Dependencies (requirements-dev.txt)
+- **Core Testing**: pytest, pytest-cov, pytest-xdist, pytest-asyncio
+- **Performance Testing**: locust, memory-profiler, psutil
+- **Code Quality**: black, isort, flake8, mypy, bandit
+- **Mocking**: factory-boy, faker, responses
+- **Documentation**: sphinx, mkdocs
+- **Security**: semgrep, OWASP ZAP
+
+### Coverage Configuration
+- HTML reports in `htmlcov/` directory
+- XML reports for CI/CD integration
+- LCOV format for advanced coverage analysis
+- Exclusion patterns for non-production code
+- Branch coverage with precision reporting
