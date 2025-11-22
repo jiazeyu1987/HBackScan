@@ -365,3 +365,267 @@ class LLMClient:
         except Exception as e:
             main_logger.error(f"❌ 医院分析报告生成过程中发生未知错误: {str(e)}")
             raise ValueError(f"❌ 医院分析报告生成过程中发生未知错误: {str(e)}")
+
+    async def get_cities_by_province(self, province_name: str) -> Dict[str, Any]:
+        """获取指定省份的城市数据（仅使用真实LLM API）"""
+        try:
+            main_logger.info(f"开始获取省份城市数据: {province_name}")
+
+            if not province_name or len(province_name.strip()) < 2:
+                raise ValueError(f"省份名称无效！'{province_name}' 请提供有效的省份名称（至少2个字符）")
+
+            # 构造提示词
+            system_prompt = """你是一个专业的地理信息系统专家。请根据用户指定的省份名称，返回该省份下辖的所有地级市、自治州、地区等行政区划信息。
+
+请严格按照JSON格式返回，包含以下字段：
+- cities: 城市列表（字符串数组）
+- count: 城市总数（整数）
+- province: 省份全名（字符串）
+
+注意：
+1. 必须返回有效的JSON格式
+2. 只返回地级市、自治州、地区等，不包含县级市
+3. 如果某些信息不确定，请根据公开行政区划信息进行合理推断
+4. 不要在JSON前后添加其他说明文字"""
+
+            user_prompt = f"""请查询以下省份的地级市、自治州、地区等行政区划：
+
+省份名称：{province_name.strip()}
+
+请返回该省份下辖的所有地级行政区划的标准JSON格式数据。"""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            # 记录发送给LLM的提示词
+            logger.info(f"=== LLM省份城市查询提示词 ===")
+            logger.info(f"系统提示词: {system_prompt}")
+            logger.info(f"用户提示词: {user_prompt}")
+            logger.info(f"============================")
+
+            # 调用LLM API
+            response = self._make_request(messages)
+
+            if not response:
+                raise ValueError("LLM API返回空响应！请检查API服务是否正常。")
+
+            # 记录LLM的回复
+            logger.info(f"=== LLM省份城市查询回复 ===")
+            logger.info(f"原始回复: {response}")
+            logger.info(f"回复长度: {len(response)} 字符")
+            logger.info(f"===========================")
+
+            # 解析JSON响应
+            try:
+                # 清理响应文本，移除可能的markdown格式
+                response = response.strip()
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.startswith('```'):
+                    response = response[3:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+
+                # 尝试提取JSON部分
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+
+                if json_start == -1 or json_end == -1:
+                    raise ValueError(f"响应中未找到有效的JSON格式！原始响应: {response[:500]}...")
+
+                json_str = response[json_start:json_end]
+
+                # 记录解析后的JSON
+                logger.info(f"=== 解析后的省份城市JSON ===")
+                logger.info(f"解析的JSON: {json_str}")
+                logger.info(f"=============================")
+
+                result = json.loads(json_str)
+
+                # 验证必要字段
+                if not isinstance(result, dict):
+                    raise ValueError(f"响应不是有效的字典格式！类型: {type(result)}")
+
+                required_fields = ['cities', 'count', 'province']
+                missing_fields = []
+
+                for field in required_fields:
+                    if field not in result:
+                        missing_fields.append(field)
+                    elif result[field] is None:
+                        missing_fields.append(f"{field}(空值)")
+
+                if missing_fields:
+                    raise ValueError(f"缺少必要字段或字段为空: {', '.join(missing_fields)}")
+
+                # 验证数据类型
+                if not isinstance(result.get('cities'), list):
+                    raise ValueError("cities字段必须是数组格式")
+
+                # 验证cities中的每个城市对象
+                for city in result['cities']:
+                    if not isinstance(city, str):
+                        raise ValueError("cities中的每个元素都必须是字符串格式")
+
+                # 记录最终存储的数据
+                logger.info(f"=== 存储的省份城市数据 ===")
+                logger.info(f"省份名称: {result.get('province')}")
+                logger.info(f"城市数量: {len(result.get('cities', []))}")
+                for i, city in enumerate(result.get('cities', [])[:5]):  # 只显示前5个
+                    logger.info(f"  城市{i+1}: {city}")
+                if len(result.get('cities', [])) > 5:
+                    logger.info(f"  ... 还有 {len(result.get('cities', [])) - 5} 个城市")
+                logger.info(f"========================")
+
+                main_logger.info(f"省份城市数据获取完成: {province_name}，共 {len(result.get('cities', []))} 个城市")
+                return result
+
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                logger.error(f"原始响应内容: {response}")
+                raise ValueError(f"无法解析LLM返回的省份城市JSON数据！解析错误: {str(e)}")
+
+        except ValueError as e:
+            # 重新抛出已知错误
+            raise e
+        except Exception as e:
+            main_logger.error(f"省份城市数据获取失败: {str(e)}")
+            raise ValueError(f"省份城市数据获取失败: {str(e)}")
+
+    async def get_districts_by_city(self, city_name: str) -> Dict[str, Any]:
+        """获取指定城市的区县数据（仅使用真实LLM API）"""
+        try:
+            main_logger.info(f"开始获取城市区县数据: {city_name}")
+
+            if not city_name or len(city_name.strip()) < 2:
+                raise ValueError(f"城市名称无效！'{city_name}' 请提供有效的城市名称（至少2个字符）")
+
+            # 构造提示词
+            system_prompt = """你是一个专业的地理信息系统专家。请根据用户指定的城市名称，返回该城市下辖的所有区县级行政区划信息。
+
+请严格按照JSON格式返回，包含以下字段：
+- items: 区县列表（对象数组）
+- count: 区县总数（整数）
+- city: 城市全名（字符串）
+
+每个区县对象包含：
+- name: 区县名称（字符串）
+- code: 行政区划代码（字符串，可为null）
+
+注意：
+1. 必须返回有效的JSON格式
+2. 包含市辖区、县级市、县、自治县等所有区县级行政区划
+3. 如果某些信息不确定，请根据公开行政区划信息进行合理推断
+4. 不要在JSON前后添加其他说明文字"""
+
+            user_prompt = f"""请查询以下城市的区县级行政区划：
+
+城市名称：{city_name.strip()}
+
+请返回该城市下辖的所有区县、县级市、县、自治县等行政区划的标准JSON格式数据。"""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            # 记录发送给LLM的提示词
+            logger.info(f"=== LLM区县查询提示词 ===")
+            logger.info(f"系统提示词: {system_prompt}")
+            logger.info(f"用户提示词: {user_prompt}")
+            logger.info(f"=========================")
+
+            # 调用LLM API
+            response = self._make_request(messages)
+
+            if not response:
+                raise ValueError("LLM API返回空响应！请检查API服务是否正常。")
+
+            # 记录LLM的回复
+            logger.info(f"=== LLM区县查询回复 ===")
+            logger.info(f"原始回复: {response}")
+            logger.info(f"回复长度: {len(response)} 字符")
+            logger.info(f"========================")
+
+            # 解析JSON响应
+            try:
+                # 清理响应文本，移除可能的markdown格式
+                response = response.strip()
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.startswith('```'):
+                    response = response[3:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+
+                # 尝试提取JSON部分
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+
+                if json_start == -1 or json_end == -1:
+                    raise ValueError(f"响应中未找到有效的JSON格式！原始响应: {response[:500]}...")
+
+                json_str = response[json_start:json_end]
+
+                # 记录解析后的JSON
+                logger.info(f"=== 解析后的区县JSON ===")
+                logger.info(f"解析的JSON: {json_str}")
+                logger.info(f"=========================")
+
+                result = json.loads(json_str)
+
+                # 验证必要字段
+                if not isinstance(result, dict):
+                    raise ValueError(f"响应不是有效的字典格式！类型: {type(result)}")
+
+                required_fields = ['items', 'count', 'city']
+                missing_fields = []
+
+                for field in required_fields:
+                    if field not in result:
+                        missing_fields.append(field)
+                    elif result[field] is None:
+                        missing_fields.append(f"{field}(空值)")
+
+                if missing_fields:
+                    raise ValueError(f"缺少必要字段或字段为空: {', '.join(missing_fields)}")
+
+                # 验证数据类型
+                if not isinstance(result.get('items'), list):
+                    raise ValueError("items字段必须是数组格式")
+
+                # 验证items中的每个区县对象
+                for item in result['items']:
+                    if not isinstance(item, dict):
+                        raise ValueError("items中的每个元素都必须是对象格式")
+                    if 'name' not in item or not item['name']:
+                        raise ValueError("items中的每个区县都必须有name字段")
+
+                # 记录最终存储的数据
+                logger.info(f"=== 存储的区县数据 ===")
+                logger.info(f"城市名称: {result.get('city')}")
+                logger.info(f"区县数量: {len(result.get('items', []))}")
+                for i, district in enumerate(result.get('items', [])[:5]):  # 只显示前5个
+                    logger.info(f"  区县{i+1}: {district.get('name')}")
+                if len(result.get('items', [])) > 5:
+                    logger.info(f"  ... 还有 {len(result.get('items', [])) - 5} 个区县")
+                logger.info(f"======================")
+
+                main_logger.info(f"城市区县数据获取完成: {city_name}，共 {len(result.get('items', []))} 个区县")
+                return result
+
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                logger.error(f"原始响应内容: {response}")
+                raise ValueError(f"无法解析LLM返回的区县JSON数据！解析错误: {str(e)}")
+
+        except ValueError as e:
+            # 重新抛出已知错误
+            raise e
+        except Exception as e:
+            main_logger.error(f"城市区县数据获取失败: {str(e)}")
+            raise ValueError(f"城市区县数据获取失败: {str(e)}")

@@ -23,24 +23,22 @@ The project follows a dual-directory structure with comprehensive testing infras
 ```
 HBackScan/
 ├── code/hospital_scanner/          # Main application code
-│   ├── main.py                     # FastAPI application entry (39KB)
-│   ├── db.py                       # Database operations layer (32KB)
-│   ├── llm_client.py               # DashScope LLM integration (14KB)
-│   ├── tasks.py                    # Async task management system (25KB)
-│   ├── schemas.py                  # Pydantic data models (11KB)
+│   ├── main.py                     # FastAPI application entry
+│   ├── db.py                       # Database operations layer
+│   ├── llm_client.py               # DashScope LLM integration
+│   ├── tasks.py                    # Async task management system
+│   ├── schemas.py                  # Pydantic data models
 │   ├── start_frontend.py           # Frontend launcher script
 │   ├── frontend/                   # Web frontend interface
-│   │   └── scanner_test.html       # HTML test interface (47KB)
+│   │   └── scanner_test.html       # HTML test interface
 │   └── tests/                      # Source-code-level tests
 ├── tests/                          # Root-level test suite
-│   ├── conftest.py                 # Root-level test fixtures (19KB)
+│   ├── conftest.py                 # Root-level test fixtures
 │   ├── helpers.py                  # Test utility functions
 │   └── test_*.py                   # Contract, acceptance, integration tests
-├── config/                         # Configuration files (Redis, etc.)
 ├── data/                           # Database storage
 ├── logs/                           # Application logs
-├── docs/                           # Comprehensive documentation
-├── examples/                       # Usage examples
+├── htmlcov/                        # Coverage reports
 ├── reports/                        # Test reports and documentation
 └── deployment files                # Docker, scripts, etc.
 ```
@@ -66,26 +64,25 @@ Province (省份)
 
 ### Environment Setup
 ```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# venv\Scripts\activate   # Windows
-
-# Install dependencies
+# Install dependencies (from project root)
 pip install -r requirements.txt
 pip install -r requirements-dev.txt  # For development
 
 # Configure environment variables
 cp .env.example .env
 # Edit .env file with your DASHSCOPE_API_KEY
+
+# Alternative: Use code/hospital_scanner/.env.example
+cp code/hospital_scanner/.env.example code/hospital_scanner/.env
 ```
 
 ### Database Operations
 ```bash
-# Initialize database
+# Initialize database (from code/hospital_scanner)
+cd code/hospital_scanner
 python -c "from db import init_db; init_db()"
 
-# Or use the Makefile
+# Or use the Makefile (from project root)
 make db-init
 ```
 
@@ -113,10 +110,6 @@ python start_frontend.py
 **Docker Mode:**
 ```bash
 # From project root - basic Docker setup
-docker-compose up -d
-
-# From code/hospital_scanner - full service stack
-cd code/hospital_scanner
 docker-compose up -d
 
 # Production deployment
@@ -258,7 +251,7 @@ All endpoints return standardized responses:
 ### Environment Variables (.env)
 ```bash
 # Required
-DASHSCOPE_API_KEY=your-api-key-here
+DASHSCOPE_API_KEY=your-dashscope-api-key-here
 
 # Optional
 HTTP_PROXY=http://proxy.company.com:8080
@@ -266,15 +259,15 @@ HTTPS_PROXY=http://proxy.company.com:8080
 HOST=0.0.0.0
 PORT=8000
 LOG_LEVEL=INFO
-DB_PATH=data/hospitals.db
+DATABASE_PATH=data/hospitals.db
 MAX_CONCURRENT_TASKS=5
+TASK_CLEANUP_HOURS=24
 ```
 
 ### Docker Configuration
 - Development: `docker-compose.yml`
-- Production: `docker-compose.prod.yml`
 - Health checks and automatic restarts configured
-- Volume mounts for data persistence
+- Volume mounts for data persistence (`./data:/app/data`, `./logs:/app/logs`)
 
 ## Development Patterns
 
@@ -337,23 +330,16 @@ MAX_CONCURRENT_TASKS=5
 ### Configuration & Deployment
 - `.env.example` - Environment variable template
 - `docker-compose.yml` - Development Docker setup
-- `docker-compose.prod.yml` - Production Docker setup
-- `Dockerfile` - Container image definition
 - `Makefile` - Development commands and utilities with colorized output
 - `pytest.ini` - Comprehensive pytest configuration with coverage and markers
+- `start.sh` - Development server startup script
 
 ### Testing
 - `tests/` - Root-level test suite (contract, acceptance, integration)
 - `code/hospital_scanner/tests/` - Source-level test suite (unit, API integration)
-- `tests/conftest.py` - Root-level test fixtures and configuration (19KB)
+- `tests/conftest.py` - Root-level test fixtures and configuration
 - `tests/helpers.py` - Test utility functions
 - `requirements-dev.txt` - Comprehensive development dependencies (195 lines)
-
-### Scripts
-- `start.sh` - Development server startup
-- `deploy.sh` - Production deployment automation
-- `install.sh` - System service installation
-- `backup.sh` - Database backup utilities
 
 ## Troubleshooting
 
@@ -373,7 +359,7 @@ docker-compose logs -f
 tail -f logs/scanner.log
 tail -f logs/ai_debug.log
 
-# Database inspection
+# Database inspection (from project root)
 sqlite3 data/hospitals.db ".tables"
 sqlite3 data/hospitals.db "SELECT COUNT(*) FROM hospital;"
 

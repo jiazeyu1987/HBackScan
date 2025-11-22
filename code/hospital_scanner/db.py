@@ -15,7 +15,7 @@ import os
 logger = logging.getLogger(__name__)
 
 # 数据库配置
-DB_PATH = "data/hospital_scanner.db"
+DB_PATH = "data/hospital_scanner_new.db"
 
 class Database:
     """数据库管理类"""
@@ -368,20 +368,24 @@ class Database:
     async def get_province_by_name(self, province_name: str):
         """根据省份名称获取省份信息"""
         try:
+            logger.info(f"🔍 查询省份: {province_name}")
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
                 cursor.execute(
-                    "SELECT * FROM province WHERE name = ? LIMIT 1",
+                    "SELECT * FROM provinces WHERE name = ? LIMIT 1",
                     (province_name,)
                 )
 
                 result = cursor.fetchone()
+                logger.info(f"📊 查询省份结果: {'找到' if result else '未找到'} {province_name}")
 
                 if result:
+                    logger.info(f"✅ 省份信息: ID={result['id']}, 名称={result['name']}")
                     return dict(result)
                 else:
+                    logger.info(f"❌ 省份不存在: {province_name}")
                     return None
 
         except Exception as e:
@@ -433,23 +437,51 @@ class Database:
     async def create_city(self, name: str, province_id: int, code: str = None) -> int:
         """创建城市"""
         try:
+            logger.info(f"🏙️ 开始创建城市: {name} (省份ID: {province_id})")
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 now = datetime.now().isoformat()
-                
+
                 cursor.execute("""
                     INSERT INTO cities (name, code, province_id, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?)
                 """, (name, code, province_id, now, now))
-                
+
                 city_id = cursor.lastrowid
                 conn.commit()
-                logger.info(f"创建城市成功: {name} (ID: {city_id})")
+                logger.info(f"✅ 创建城市成功: {name} (ID: {city_id}, 省份ID: {province_id})")
                 return city_id
-                
+
         except Exception as e:
-            logger.error(f"创建城市失败: {e}")
+            logger.error(f"❌ 创建城市失败: {name}, 错误: {e}")
             return 0
+
+    async def get_city_by_name(self, city_name: str):
+        """根据城市名称获取城市信息"""
+        try:
+            logger.info(f"🔍 查询城市: {city_name}")
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT * FROM cities WHERE name = ? LIMIT 1",
+                    (city_name,)
+                )
+
+                result = cursor.fetchone()
+                logger.info(f"📊 查询城市结果: {'找到' if result else '未找到'} {city_name}")
+
+                if result:
+                    logger.info(f"✅ 城市信息: ID={result['id']}, 名称={result['name']}, 省份ID={result['province_id']}")
+                    return dict(result)
+                else:
+                    logger.info(f"❌ 城市不存在: {city_name}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"根据名称获取城市信息失败: {e}")
+            return None
 
     async def get_cities(self, province_id: int = None, page: int = 1, page_size: int = 20) -> tuple:
         """获取城市列表"""
@@ -530,6 +562,33 @@ class Database:
         except Exception as e:
             logger.error(f"创建区县失败: {e}")
             return 0
+
+    async def get_district_by_name(self, district_name: str):
+        """根据区县名称获取区县信息"""
+        try:
+            logger.info(f"🔍 查询区县: {district_name}")
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT * FROM districts WHERE name = ? LIMIT 1",
+                    (district_name,)
+                )
+
+                result = cursor.fetchone()
+                logger.info(f"📊 查询区县结果: {'找到' if result else '未找到'} {district_name}")
+
+                if result:
+                    logger.info(f"✅ 区县信息: ID={result['id']}, 名称={result['name']}, 城市ID={result['city_id']}")
+                    return dict(result)
+                else:
+                    logger.info(f"❌ 区县不存在: {district_name}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"根据名称获取区县信息失败: {e}")
+            return None
 
     async def get_districts(self, city_id: int = None, page: int = 1, page_size: int = 20) -> tuple:
         """获取区县列表"""

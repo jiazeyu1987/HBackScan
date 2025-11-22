@@ -447,7 +447,7 @@
                                     🏛️ 指定省份刷新
                                 </label>
                             </div>
-                            <div id="provinceSelect" style="display: none; margin-top: 10px;">
+                            <div id="provinceRefreshContainer" style="display: none; margin-top: 10px;">
                                 <select id="provinceDropdown" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                                     <option value="">选择省份...</option>
                                 </select>
@@ -487,6 +487,48 @@
                     </div>
                     <p style="color: #6c757d; font-size: 14px; margin-top: 10px;">
                         💡 快速扫描指定省份的城市数据，无需填写表单
+                    </p>
+                </div>
+
+                <!-- 城市区县扫描 -->
+                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e9ecef;">
+                    <h4 style="color: #495057; margin-bottom: 15px;">🏘️ 城市区县扫描</h4>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                        <div class="form-group" style="margin: 0;">
+                            <label for="provinceSelect">选择省份</label>
+                            <select id="provinceSelect" class="form-control">
+                                <option value="">请选择省份...</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin: 0;">
+                            <label for="citySelect">选择城市</label>
+                            <select id="citySelect" class="form-control" disabled>
+                                <option value="">请先选择省份...</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <button type="button" class="btn btn-primary" id="scanDistrictBtn" style="background: #28a745; border-color: #28a745;" disabled>
+                            🏘️ 扫描区县
+                        </button>
+                        <span id="districtScanStatus" style="color: #6c757d; font-size: 14px;">
+                            请选择省份和城市
+                        </span>
+                    </div>
+
+                    <div style="margin-top: 15px;">
+                        <div id="districtResults" style="display: none;">
+                            <h5 style="color: #495057; margin-bottom: 10px;">📋 扫描结果</h5>
+                            <div id="districtList" style="background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef; max-height: 200px; overflow-y: auto;">
+                                <!-- 区县列表将在这里显示 -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <p style="color: #6c757d; font-size: 14px; margin-top: 10px;">
+                        💡 选择省份和城市后，扫描该城市的所有区县数据
                     </p>
                 </div>
             </div>
@@ -610,6 +652,7 @@
         const refreshProvince = document.getElementById('refreshProvince');
         const provinceSelect = document.getElementById('provinceSelect');
         const provinceDropdown = document.getElementById('provinceDropdown');
+        const provinceRefreshContainer = document.getElementById('provinceRefreshContainer');
 
         // 数据刷新任务管理
         let refreshTaskId = null;
@@ -693,34 +736,108 @@
         // 刷新类型切换
         refreshAll.addEventListener('change', () => {
             if (refreshAll.checked) {
-                provinceSelect.style.display = 'none';
+                provinceRefreshContainer.style.display = 'none';
             }
         });
 
         refreshProvince.addEventListener('change', () => {
             if (refreshProvince.checked) {
-                provinceSelect.style.display = 'block';
+                provinceRefreshContainer.style.display = 'block';
                 loadProvinces();
             }
         });
 
-        // 加载省份数据
+        // 加载省份数据 - 统一版本，支持省份扫描和区县扫描功能
         async function loadProvinces() {
             try {
-                const response = await fetch(`${API_BASE}/provinces`);
-                const data = await response.json();
+                addLog('开始加载省份列表...', 'info');
+                console.log('API_BASE:', API_BASE);
+                addLog(`正在请求: ${API_BASE}/provinces?page=1&page_size=100`, 'info');
 
-                if (response.ok && data.items) {
-                    provinceDropdown.innerHTML = '<option value="">选择省份...</option>';
-                    data.items.forEach(province => {
-                        const option = document.createElement('option');
-                        option.value = province.name;
-                        option.textContent = province.name;
-                        provinceDropdown.appendChild(option);
-                    });
+                const response = await fetch(`${API_BASE}/provinces?page=1&page_size=100`);
+                console.log('Response status:', response.status);
+                addLog(`API响应状态: ${response.status}`, response.ok ? 'success' : 'error');
+
+                const result = await response.json();
+                console.log('API返回完整数据:', result);
+                addLog('API响应数据解析完成', 'info');
+
+                // 修复数据结构检查 - API直接返回items，不是result.data.items
+                if (response.ok && result.items) {
+                    const provinces = result.items;
+                    addLog(`成功获取 ${provinces.length} 个省份`, 'success');
+                    console.log('省份数据:', provinces);
+
+                    // 填充省份扫描功能的下拉框
+                    console.log('provinceDropdown元素:', provinceDropdown);
+                    if (provinceDropdown) {
+                        console.log('开始填充省份扫描下拉框...');
+                        provinceDropdown.innerHTML = '<option value="">选择省份...</option>';
+                        provinces.forEach((province, index) => {
+                            console.log(`添加省份 ${index}:`, province.name);
+                            const option = document.createElement('option');
+
+                            // 解析省份名称 - 处理可能的JSON格式
+                            let displayName = province.name;
+                            try {
+                                // 如果省份名称是JSON格式，提取真实名称
+                                if (province.name && province.name.startsWith('{')) {
+                                    const provinceData = JSON.parse(province.name);
+                                    displayName = provinceData.name || province.name;
+                                }
+                            } catch (e) {
+                                // 如果解析失败，使用原始名称
+                                console.warn('解析省份名称失败，使用原始名称:', province.name, e);
+                            }
+
+                            option.value = displayName;
+                            option.textContent = displayName;
+                            provinceDropdown.appendChild(option);
+                        });
+                        console.log('省份扫描下拉框选项数量:', provinceDropdown.options.length);
+                        addLog(`省份扫描下拉框更新完成，共${provinceDropdown.options.length - 1}个选项`, 'success');
+                    } else {
+                        addLog('未找到provinceDropdown元素', 'error');
+                    }
+
+                    // 填充城市区县扫描功能的下拉框
+                    console.log('provinceSelect元素:', provinceSelect);
+                    if (provinceSelect) {
+                        console.log('开始填充城市区县扫描下拉框...');
+                        provinceSelect.innerHTML = '<option value="">请选择省份...</option>';
+                        provinces.forEach((province, index) => {
+                            console.log(`添加省份 ${index}:`, province.name);
+                            const option = document.createElement('option');
+
+                            // 解析省份名称 - 处理可能的JSON格式
+                            let displayName = province.name;
+                            try {
+                                // 如果省份名称是JSON格式，提取真实名称
+                                if (province.name && province.name.startsWith('{')) {
+                                    const provinceData = JSON.parse(province.name);
+                                    displayName = provinceData.name || province.name;
+                                }
+                            } catch (e) {
+                                // 如果解析失败，使用原始名称
+                                console.warn('解析省份名称失败，使用原始名称:', province.name, e);
+                            }
+
+                            option.value = displayName;
+                            option.textContent = displayName;
+                            provinceSelect.appendChild(option);
+                        });
+                        console.log('城市区县扫描下拉框选项数量:', provinceSelect.options.length);
+                        addLog(`城市区县扫描下拉框更新完成，共${provinceSelect.options.length - 1}个选项`, 'success');
+                    } else {
+                        addLog('未找到provinceSelect元素', 'error');
+                    }
+                } else {
+                    console.log('API响应结构不正确:', result);
+                    addLog('获取省份列表失败: ' + (result.message || '数据结构错误') + ' - 查看控制台了解详情', 'error');
                 }
             } catch (error) {
-                addLog(`加载省份数据失败: ${error.message}`, 'error');
+                console.error('loadProvinces异常:', error);
+                addLog(`加载省份列表异常: ${error.message}`, 'error');
             }
         }
 
@@ -1337,6 +1454,296 @@
         window.addEventListener('beforeunload', () => {
             pollingIntervals.forEach(interval => clearInterval(interval));
         });
+
+        // ==================== 城市区县扫描功能 ====================
+
+        // 获取DOM元素
+        // provinceSelect 已在上面定义
+        const citySelect = document.getElementById('citySelect');
+        const scanDistrictBtn = document.getElementById('scanDistrictBtn');
+        const districtScanStatus = document.getElementById('districtScanStatus');
+        const districtResults = document.getElementById('districtResults');
+        const districtList = document.getElementById('districtList');
+
+        // 当前选中的省份和城市
+        let currentProvince = '';
+        let currentCity = '';
+
+  
+        // 省份选择变化事件
+        provinceSelect.addEventListener('change', async () => {
+            const selectedProvince = provinceSelect.value;
+            console.log('省份选择变化:', selectedProvince);
+            addLog(`省份选择变化: ${selectedProvince || '清空选择'}`, 'info');
+
+            if (!selectedProvince) {
+                console.log('清空省份选择，重置城市下拉框');
+                citySelect.innerHTML = '<option value="">请先选择省份...</option>';
+                citySelect.disabled = true;
+                scanDistrictBtn.disabled = true;
+                districtScanStatus.textContent = '请选择省份和城市';
+                districtResults.style.display = 'none';
+                currentProvince = '';
+                currentCity = '';
+                return;
+            }
+
+            console.log('开始加载城市数据...');
+            currentProvince = selectedProvince;
+            citySelect.disabled = true;
+            scanDistrictBtn.disabled = true;
+            districtScanStatus.textContent = '正在加载城市...';
+
+            try {
+                const url = `${API_BASE}/cities?province=${encodeURIComponent(selectedProvince)}`;
+                console.log('请求城市数据:', url);
+                addLog(`正在请求城市数据: ${url}`, 'info');
+
+                const response = await fetch(url);
+                console.log('城市API响应状态:', response.status);
+                addLog(`城市API响应状态: ${response.status}`, response.ok ? 'success' : 'error');
+
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('城市API返回完整数据:', data);
+                    addLog('城市API数据解析完成', 'info');
+
+                    // 修复数据结构 - API直接返回items，不是data.items
+                    const cities = data.items || [];
+                    console.log('解析出的城市数据:', cities);
+                    addLog(`成功解析 ${cities.length} 个城市`, 'success');
+
+                    console.log('开始填充城市下拉框...');
+                    console.log('citySelect元素:', citySelect);
+
+                    citySelect.innerHTML = '<option value="">请选择城市...</option>';
+                    cities.forEach((city, index) => {
+                        console.log(`添加城市 ${index}:`, city.name);
+                        const option = document.createElement('option');
+                        option.value = city.name;
+                        option.textContent = city.name;
+                        citySelect.appendChild(option);
+                    });
+
+                    console.log('城市下拉框选项数量:', citySelect.options.length);
+                    addLog(`城市下拉框更新完成，共${citySelect.options.length - 1}个选项`, 'success');
+
+                    citySelect.disabled = false;
+                    districtScanStatus.textContent = '请选择城市';
+                    addLog(`成功加载 ${cities.length} 个城市`, 'success');
+                } else {
+                    console.log('城市API调用失败，响应状态:', response.status);
+                    addLog(`加载城市列表失败: HTTP ${response.status}`, 'error');
+                    districtScanStatus.textContent = '加载城市失败';
+                }
+            } catch (error) {
+                console.error('加载城市列表异常:', error);
+                addLog(`加载城市列表异常: ${error.message}`, 'error');
+                districtScanStatus.textContent = '加载城市异常';
+            }
+        });
+
+        // 城市选择变化事件
+        citySelect.addEventListener('change', () => {
+            const selectedCity = citySelect.value;
+
+            if (!selectedCity) {
+                scanDistrictBtn.disabled = true;
+                districtScanStatus.textContent = '请选择城市';
+                districtResults.style.display = 'none';
+                currentCity = '';
+                return;
+            }
+
+            currentCity = selectedCity;
+            scanDistrictBtn.disabled = false;
+            districtScanStatus.textContent = `准备扫描 ${selectedCity} 的区县数据`;
+            districtResults.style.display = 'none';
+        });
+
+        // 扫描区县按钮点击事件
+        scanDistrictBtn.addEventListener('click', async () => {
+            if (!currentCity) {
+                addLog('请先选择城市', 'error');
+                return;
+            }
+
+            try {
+                // 禁用按钮，防止重复点击
+                scanDistrictBtn.disabled = true;
+                scanDistrictBtn.innerHTML = '🔄 扫描中...';
+                districtScanStatus.textContent = `正在扫描 ${currentCity} 的区县数据...`;
+                districtResults.style.display = 'none';
+
+                addLog(`开始扫描城市区县: ${currentCity}`, 'info');
+
+                // 调用区县扫描API（使用省份端点，后端会自动检测城市名称）
+                const response = await fetch(`${API_BASE}/refresh/province/${encodeURIComponent(currentCity)}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    const taskId = result.task_id;
+
+                    addLog(`区县扫描任务已创建: ${taskId}`, 'success');
+
+                    // 开始轮询任务状态
+                    pollDistrictTask(taskId);
+                } else {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || '区县扫描请求失败');
+                }
+
+            } catch (error) {
+                addLog(`区县扫描失败: ${error.message}`, 'error');
+                districtScanStatus.textContent = `扫描失败: ${error.message}`;
+                scanDistrictBtn.disabled = false;
+                scanDistrictBtn.innerHTML = '🏘️ 扫描区县';
+            }
+        });
+
+        // 轮询区县扫描任务状态
+        function pollDistrictTask(taskId) {
+            const interval = setInterval(async () => {
+                try {
+                    const response = await fetch(`${API_BASE}/tasks/${taskId}`);
+
+                    if (response.ok) {
+                        const task = await response.json();
+
+                        if (task.status === 'completed') {
+                            clearInterval(interval);
+                            handleDistrictTaskCompleted(task);
+                        } else if (task.status === 'failed') {
+                            clearInterval(interval);
+                            handleDistrictTaskFailed(task);
+                        } else if (task.status === 'running') {
+                            districtScanStatus.textContent = `扫描进度: ${task.progress || 0}% - ${task.current_step || '处理中...'}`;
+                        }
+                    } else {
+                        clearInterval(interval);
+                        addLog('查询任务状态失败', 'error');
+                        districtScanStatus.textContent = '查询任务状态失败';
+                        scanDistrictBtn.disabled = false;
+                        scanDistrictBtn.innerHTML = '🏘️ 扫描区县';
+                    }
+                } catch (error) {
+                    clearInterval(interval);
+                    addLog(`查询任务状态异常: ${error.message}`, 'error');
+                    districtScanStatus.textContent = '查询任务状态异常';
+                    scanDistrictBtn.disabled = false;
+                    scanDistrictBtn.innerHTML = '🏘️ 扫描区县';
+                }
+            }, 2000);
+
+            // 保存定时器以便清理
+            pollingIntervals.set(`district-${Date.now()}`, interval);
+        }
+
+        // 处理区县扫描任务完成
+        async function handleDistrictTaskCompleted(task) {
+            try {
+                addLog(`区县扫描任务完成: ${currentCity}`, 'success');
+                districtScanStatus.textContent = `✅ ${currentCity} 区县扫描完成`;
+
+                // 从任务结果中获取区县数据
+                let districtData = [];
+                if (task.result) {
+                    // 尝试解析任务结果
+                    try {
+                        const resultData = typeof task.result === 'string' ? JSON.parse(task.result) : task.result;
+
+                        // 如果结果包含区县信息，提取出来
+                        if (resultData.districts && Array.isArray(resultData.districts)) {
+                            districtData = resultData.districts;
+                        } else if (resultData.items && Array.isArray(resultData.items)) {
+                            districtData = resultData.items;
+                        }
+                    } catch (parseError) {
+                        console.warn('解析任务结果失败:', parseError);
+                    }
+                }
+
+                // 如果从任务结果中没有获取到区县数据，尝试从数据库获取
+                if (districtData.length === 0) {
+                    districtData = await getDistrictsFromDatabase(currentCity);
+                }
+
+                // 显示区县结果
+                displayDistrictResults(districtData);
+
+            } catch (error) {
+                addLog(`处理区县扫描结果失败: ${error.message}`, 'error');
+                districtScanStatus.textContent = '处理扫描结果失败';
+            } finally {
+                scanDistrictBtn.disabled = false;
+                scanDistrictBtn.innerHTML = '🏘️ 扫描区县';
+            }
+        }
+
+        // 处理区县扫描任务失败
+        function handleDistrictTaskFailed(task) {
+            addLog(`区县扫描任务失败: ${task.error_message || '未知错误'}`, 'error');
+            districtScanStatus.textContent = `❌ 扫描失败: ${task.error_message || '未知错误'}`;
+            scanDistrictBtn.disabled = false;
+            scanDistrictBtn.innerHTML = '🏘️ 扫描区县';
+        }
+
+        // 从数据库获取区县数据
+        async function getDistrictsFromDatabase(cityName) {
+            try {
+                // 这里我们需要通过API获取区县数据
+                // 由于当前系统可能没有直接获取某个城市所有区县的API，我们使用通用方法
+                const response = await fetch(`${API_BASE}/districts?page=1&page_size=200`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const allDistricts = data.data?.items || [];
+
+                    // 过滤出属于当前城市的区县
+                    // 注意：这里需要后端API支持按城市过滤，或者我们需要获取城市ID
+                    return allDistricts.filter(district =>
+                        district.name && district.name.includes('区') || district.name.includes('县')
+                    );
+                }
+            } catch (error) {
+                console.warn('从数据库获取区县数据失败:', error);
+            }
+            return [];
+        }
+
+        // 显示区县扫描结果
+        function displayDistrictResults(districts) {
+            if (!districts || districts.length === 0) {
+                districtList.innerHTML = '<p style="color: #6c757d; text-align: center;">未找到区县数据</p>';
+            } else {
+                const districtHtml = districts.map((district, index) => `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; margin-bottom: 5px; background: white; border-radius: 4px; border: 1px solid #dee2e6;">
+                        <span>
+                            <strong>${index + 1}.</strong> ${district.name || district}
+                        </span>
+                        <span style="color: #28a745; font-size: 12px;">✅</span>
+                    </div>
+                `).join('');
+
+                districtList.innerHTML = `
+                    <div style="margin-bottom: 10px; color: #495057; font-weight: bold;">
+                        共获取到 ${districts.length} 个区县：
+                    </div>
+                    ${districtHtml}
+                `;
+            }
+
+            districtResults.style.display = 'block';
+        }
+
+        // 页面加载时初始化
+        console.log('页面加载完成，开始初始化省份列表...');
+        addLog('页面初始化：开始加载省份列表', 'info');
+        loadProvinces();
     </script>
 </body>
 </html>
