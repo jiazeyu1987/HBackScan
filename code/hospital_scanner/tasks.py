@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional, List
 from enum import Enum
 
 from db import get_db
-from schemas import TaskStatus, ScanTaskRequest, ScanResult
+from schemas import TaskStatus, TaskType, ScanTaskRequest, ScanResult
 
 logger = logging.getLogger(__name__)
 
@@ -25,35 +25,46 @@ class TaskManager:
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
     
-    async def create_task(self, request: ScanTaskRequest) -> str:
+    async def create_task(self, request: ScanTaskRequest, custom_task_id: str = None) -> str:
         """创建任务"""
         with self._lock:
-            task_id = str(uuid.uuid4())
-            
+            # 使用自定义task_id或生成新的
+            task_id = custom_task_id if custom_task_id else str(uuid.uuid4())
+
             task_data = {
                 "task_id": task_id,
                 "hospital_name": request.hospital_name,
                 "query": request.query,
+                "task_type": request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type),
                 "status": TaskStatus.PENDING.value,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
                 "result": None,
                 "error_message": None
             }
-            
+
             # 保存到内存
             self.tasks[task_id] = task_data
-            
+
             # 保存到数据库
             db = await get_db()
-            await db.create_task(
+            task_type_str = request.task_type.value if hasattr(request.task_type, 'value') else str(request.task_type)
+
+            db_success = await db.create_task(
                 task_id=task_id,
                 hospital_name=request.hospital_name,
                 query=request.query,
-                status=TaskStatus.PENDING.value
+                status=TaskStatus.PENDING.value,
+                task_type=task_type_str
             )
-            
-            logger.info(f"创建任务成功: {task_id}")
+
+            if not db_success:
+                # 数据库插入失败，从内存中移除任务
+                del self.tasks[task_id]
+                logger.error(f"数据库插入失败，任务创建失败: {task_id}")
+                raise Exception(f"Failed to create task in database: {task_id}")
+
+            logger.info(f"创建任务成功: {task_id} (type: {task_type_str}, {'自定义ID' if custom_task_id else '自动生成ID'})")
             return task_id
     
     async def update_task_status(self, task_id: str, status: TaskStatus, error_message: Optional[str] = None):
@@ -82,8 +93,19 @@ class TaskManager:
 
                     logger.info(f"✅ 内存中的任务状态已更新: {task_id} -> {status.value}")
 
-                    # 如果任务已完成或失败，自动清理
+                    # 判断是否为全国扫描任务，如果是则不自动删除（保留历史记录）
+                    should_preserve_task = False
                     if status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                        task_type = self.tasks[task_id].get("task_type", "")
+                        task_hospital_name = self.tasks[task_id].get("hospital_name", "")
+
+                        # 优先使用task_type字段，兼容旧数据
+                        if task_type == TaskType.NATIONWIDE.value or "全国扫描" in task_hospital_name:
+                            should_preserve_task = True
+                            logger.info(f"🏛️ 检测到全国扫描任务，将保留历史记录: {task_id} (type: {task_type or 'legacy'})")
+
+                    # 如果任务已完成或失败，且不是全国扫描任务，则自动清理
+                    if status in [TaskStatus.COMPLETED, TaskStatus.FAILED] and not should_preserve_task:
                         logger.info(f"🗑️ 任务已{status.value}，准备自动清理: {task_id}")
                         try:
                             delete_success = await db.delete_completed_task(task_id)
@@ -102,6 +124,29 @@ class TaskManager:
                 else:
                     logger.warning(f"⚠️ 任务不存在于内存中，但数据库状态已更新: {task_id}")
                     logger.info(f"📋 当前内存中的任务列表: {list(self.tasks.keys())}")
+
+                    # 对于不在内存中的任务，如果状态为完成/失败，也需要检查是否要删除
+                    if status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                        # 查询数据库中的任务信息以判断是否为全国任务
+                        try:
+                            db = await get_db()
+                            db_tasks = await db.list_tasks(1000)  # 获取足够多的任务
+                            target_task = next((t for t in db_tasks if t.get("task_id") == task_id), None)
+
+                            if target_task:
+                                task_type = target_task.get("task_type", "")
+                                task_hospital_name = target_task.get("hospital_name", "")
+
+                                # 优先使用task_type字段，兼容旧数据
+                                if task_type == TaskType.NATIONWIDE.value or "全国扫描" in task_hospital_name:
+                                    logger.info(f"🏛️ 数据库中的全国扫描任务，将保留历史记录: {task_id} (type: {task_type or 'legacy'})")
+                                else:
+                                    # 非全国任务，可以删除（如果还没被delete_completed_task处理）
+                                    logger.info(f"🗑️ 非全国任务已{status.value}，可清理: {task_id}")
+                            else:
+                                logger.warning(f"⚠️ 数据库中也未找到任务记录: {task_id}")
+                        except Exception as query_error:
+                            logger.warning(f"⚠️ 查询数据库任务信息失败: {query_error}")
 
                 logger.info(f"🎉 任务状态更新完成: {task_id} -> {status.value}")
 
@@ -228,6 +273,66 @@ class TaskManager:
         logger.info(f"清理完成的任务: {cleaned_count}个")
         return cleaned_count
     
+    async def get_active_tasks(self) -> List[Dict[str, Any]]:
+        """获取当前活动的任务（运行中和等待中的任务）"""
+        active_statuses = [TaskStatus.PENDING.value, TaskStatus.RUNNING.value]
+        active_tasks = []
+
+        # 从内存中获取活动任务
+        memory_tasks = []
+        for task_data in self.tasks.values():
+            if task_data.get("status") in active_statuses:
+                # 转换为字典对象，包含所有必要字段
+                memory_tasks.append({
+                    "task_id": task_data["task_id"],
+                    "hospital_name": task_data["hospital_name"],
+                    "status": task_data["status"],
+                    "created_at": task_data["created_at"],
+                    "updated_at": task_data["updated_at"],
+                    "task_type": task_data.get("task_type", "hospital"),
+                    "error_message": task_data.get("error_message")
+                })
+
+        # 总是从数据库获取最新的活动任务，确保数据的完整性和一致性
+        try:
+            db = await get_db()
+            db_tasks = await db.list_tasks(1000)  # 获取最近1000个任务
+            db_active_tasks = []
+            for task in db_tasks:
+                if task.get("status") in active_statuses:
+                    db_active_tasks.append({
+                        "task_id": task.get("task_id"),
+                        "hospital_name": task.get("hospital_name"),
+                        "status": task.get("status"),
+                        "created_at": task.get("created_at"),
+                        "updated_at": task.get("updated_at"),
+                        "task_type": task.get("task_type", "hospital"),
+                        "error_message": task.get("error_message")
+                    })
+
+            # 合并内存和数据库的任务，去重以task_id为准
+            seen_task_ids = set()
+            for task in memory_tasks:
+                task_id = task.get("task_id")
+                if task_id and task_id not in seen_task_ids:
+                    active_tasks.append(task)
+                    seen_task_ids.add(task_id)
+
+            for task in db_active_tasks:
+                task_id = task.get("task_id")
+                if task_id and task_id not in seen_task_ids:
+                    active_tasks.append(task)
+                    seen_task_ids.add(task_id)
+
+            logger.info(f"获取活动任务: 内存任务={len(memory_tasks)}, 数据库任务={len(db_active_tasks)}, 合并后={len(active_tasks)}")
+
+        except Exception as e:
+            logger.error(f"从数据库获取活动任务失败: {e}")
+            # 如果数据库查询失败，只返回内存中的任务
+            active_tasks = memory_tasks
+
+        return active_tasks
+
     async def get_statistics(self) -> Dict[str, Any]:
         """获取任务统计信息"""
         stats = {
@@ -238,10 +343,10 @@ class TaskManager:
             "failed_tasks": 0,
             "recent_tasks": []
         }
-        
+
         for task_data in self.tasks.values():
             status = task_data.get("status", "")
-            
+
             if status == TaskStatus.PENDING.value:
                 stats["pending_tasks"] += 1
             elif status == TaskStatus.RUNNING.value:
@@ -250,14 +355,14 @@ class TaskManager:
                 stats["completed_tasks"] += 1
             elif status == TaskStatus.FAILED.value:
                 stats["failed_tasks"] += 1
-        
+
         # 获取最近的任务
         recent_tasks = sorted(
             self.tasks.values(),
             key=lambda x: x.get("created_at", ""),
             reverse=True
         )[:10]
-        
+
         stats["recent_tasks"] = recent_tasks
 
         return stats
@@ -552,11 +657,18 @@ async def execute_province_cities_districts_refresh_task(task_id: str, province_
                         # 添加所有区县到 all_districts 列表（无论新旧）
                         all_districts.append(district_name)
 
-                        existing_district = await db.get_district_by_name(district_name)
+                        # 使用精确查询：检查该城市下是否已存在同名区县
+                        existing_district = await db.get_district_by_name_and_city(district_name, city_id)
                         if existing_district:
-                            logger.info(f"⏭️ 区县已存在，跳过: {district_name}")
+                            logger.info(f"⏭️ 区县已存在（城市 {city_id}），跳过: {district_name}")
                             districts_skipped += 1
                         else:
+                            # 如果精确查询没找到，检查全局是否有同名区县（记录潜在冲突）
+                            global_district = await db.get_district_by_name(district_name)
+                            if global_district:
+                                logger.warning(f"⚠️ 发现跨城市同名区县冲突: '{district_name}' 已存在于城市 {global_district.get('city_id')}，当前城市: {city_id}")
+                                logger.info(f"🔄 将在新城市 {city_id} 中创建区县: {district_name}")
+
                             district_id = await db.create_district(district_name, city_id)
                             logger.info(f"✅ 创建新区县: {district_name}, 城市ID: {city_id}")
                             districts_created += 1
@@ -643,3 +755,352 @@ async def execute_province_cities_districts_refresh_task(task_id: str, province_
             logger.error(f"❌ 更新任务状态失败: {update_error}")
 
         raise
+
+
+async def get_all_provinces_from_llm() -> List[str]:
+    """
+    从LLM获取全国所有省份数据
+
+    Returns:
+        List[str]: 省份名称列表
+
+    Raises:
+        Exception: 当LLM调用失败或返回数据无效时
+    """
+    try:
+        logger.info("🌍 开始从LLM获取全国省份数据...")
+
+        from llm_client import LLMClient
+        llm_client = LLMClient()
+
+        # 构建获取省份的提示词
+        province_prompt = """
+请返回中国的所有省级行政区划，包括省份、自治区、直辖市和特别行政区。
+
+要求：
+1. 返回JSON格式
+2. 包含完整的中文名称
+3. 按照标准的行政区划代码排序
+
+格式示例：
+{
+  "items": [
+    {"name": "北京市", "code": "110000"},
+    {"name": "天津市", "code": "120000"},
+    {"name": "河北省", "code": "130000"},
+    {"name": "山西省", "code": "140000"},
+    {"name": "内蒙古自治区", "code": "150000"},
+    {"name": "辽宁省", "code": "210000"},
+    {"name": "吉林省", "code": "220000"},
+    {"name": "黑龙江省", "code": "230000"},
+    {"name": "上海市", "code": "310000"},
+    {"name": "江苏省", "code": "320000"},
+    {"name": "浙江省", "code": "330000"},
+    {"name": "安徽省", "code": "340000"},
+    {"name": "福建省", "code": "350000"},
+    {"name": "江西省", "code": "360000"},
+    {"name": "山东省", "code": "370000"},
+    {"name": "河南省", "code": "410000"},
+    {"name": "湖北省", "code": "420000"},
+    {"name": "湖南省", "code": "430000"},
+    {"name": "广东省", "code": "440000"},
+    {"name": "广西壮族自治区", "code": "450000"},
+    {"name": "海南省", "code": "460000"},
+    {"name": "重庆市", "code": "500000"},
+    {"name": "四川省", "code": "510000"},
+    {"name": "贵州省", "code": "520000"},
+    {"name": "云南省", "code": "530000"},
+    {"name": "西藏自治区", "code": "540000"},
+    {"name": "陕西省", "code": "610000"},
+    {"name": "甘肃省", "code": "620000"},
+    {"name": "青海省", "code": "630000"},
+    {"name": "宁夏回族自治区", "code": "640000"},
+    {"name": "新疆维吾尔自治区", "code": "650000"},
+    {"name": "香港特别行政区", "code": "810000"},
+    {"name": "澳门特别行政区", "code": "820000"}
+  ]
+}
+"""
+
+        province_messages = [
+            {"role": "system", "content": "你是一个专业的地理信息系统数据助手，专门处理中国行政区划数据。"},
+            {"role": "user", "content": province_prompt}
+        ]
+
+        logger.info("📤 发送省份查询请求到LLM...")
+        province_response = llm_client._make_request(province_messages, max_tokens=2000)
+
+        if not province_response:
+            raise Exception("LLM返回空响应，无法获取省份数据")
+
+        logger.info("✅ 成功获取省份响应，开始解析...")
+        logger.info(f"📄 响应长度: {len(province_response)} 字符")
+
+        # 解析JSON响应
+        import json
+        try:
+            # 清理响应文本
+            cleaned_response = province_response.strip()
+            if cleaned_response.startswith('```json'):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.startswith('```'):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+
+            # 提取JSON部分
+            json_start = cleaned_response.find('{')
+            json_end = cleaned_response.rfind('}') + 1
+
+            if json_start == -1 or json_end == -1:
+                raise ValueError(f"响应中未找到有效的JSON格式！原始响应: {cleaned_response[:500]}...")
+
+            json_str = cleaned_response[json_start:json_end]
+            province_data = json.loads(json_str)
+
+            provinces = province_data.get('items', [])
+            if not provinces:
+                raise ValueError("返回数据中没有找到省份列表")
+
+            # 提取省份名称
+            province_names = []
+            for item in provinces:
+                if isinstance(item, dict):
+                    name = item.get('name', '').strip()
+                else:
+                    name = str(item).strip()
+
+                if name:
+                    province_names.append(name)
+
+            # 去重处理，防止LLM返回重复省份
+            original_count = len(province_names)
+            province_names = list(dict.fromkeys(province_names))  # 保持顺序的去重
+            deduplicated_count = len(province_names)
+
+            if deduplicated_count < original_count:
+                logger.info(f"🔄 省份去重: {original_count} -> {deduplicated_count} 个省份 (移除 {original_count - deduplicated_count} 个重复)")
+
+            logger.info(f"🌍 成功解析省份数据: {len(province_names)} 个省级行政区")
+
+            # 验证是否至少有一个有效省份
+            if len(province_names) == 0:
+                logger.warning("⚠️ LLM返回的省份数据解析成功，但没有有效的省份名称")
+                logger.warning(f"📋 原始数据项数: {len(provinces)}")
+                logger.warning(f"📋 原始数据示例: {provinces[:3] if provinces else 'None'}")
+            else:
+                # 显示前10个省份作为验证
+                for i, province in enumerate(province_names[:10]):
+                    logger.info(f"📍 省份{i+1}: {province}")
+                if len(province_names) > 10:
+                    logger.info(f"📍 ... 还有 {len(province_names) - 10} 个省份")
+
+            return province_names
+
+        except json.JSONDecodeError as je:
+            logger.warning(f"⚠️ JSON解析失败，尝试文本解析: {je}")
+            # 如果JSON解析失败，尝试简单的文本提取
+            lines = province_response.split('\n')
+            provinces = []
+            for line in lines:
+                line = line.strip()
+                if ('省' in line or '市' in line or '区' in line or '自治' in line) and not line.startswith('#'):
+                    # 简单的省份名称提取
+                    import re
+                    match = re.search(r'[\u4e00-\u9fa5]+[省市自治区特别行政区]', line)
+                    if match:
+                        province_name = match.group()
+                        if province_name not in provinces:
+                            provinces.append(province_name)
+
+            logger.info(f"🌍 通过文本解析获得 {len(provinces)} 个省份")
+            return provinces
+
+    except Exception as e:
+        logger.error(f"❌ 获取省份数据失败: {str(e)}")
+        logger.error(f"📋 异常类型: {type(e).__name__}")
+        import traceback
+        logger.error(f"📋 完整堆栈: {traceback.format_exc()}")
+        raise Exception(f"无法从LLM获取省份数据: {str(e)}")
+
+
+async def execute_all_provinces_cascade_refresh(task_id: str, task_manager: TaskManager):
+    """
+    执行全国所有省份的级联刷新任务
+
+    Args:
+        task_id: 任务ID
+        task_manager: 任务管理器实例
+
+    该函数会：
+    1. 从LLM获取所有省份列表
+    2. 串行处理每个省份（避免过度并发）
+    3. 对每个省份执行完整的级联刷新
+    4. 提供详细的进度跟踪和错误处理
+    """
+    import time
+    import asyncio
+    from datetime import datetime
+
+    start_time = time.time()
+    total_provinces = 0
+    successful_provinces = 0
+    failed_provinces = 0
+
+    try:
+        logger.info("🌍 ========== 开始执行全国扫描任务 ==========")
+        logger.info(f"📋 任务ID: {task_id}")
+        logger.info(f"⏰ 开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 阶段1: 获取所有省份列表
+        logger.info("🔄 阶段1: 获取全国所有省份列表")
+        await task_manager.update_task_status(task_id, TaskStatus.RUNNING, "正在获取全国所有省份列表...")
+
+        try:
+            provinces = await get_all_provinces_from_llm()
+            total_provinces = len(provinces)
+
+            # Check if LLM returned empty provinces list
+            if total_provinces == 0:
+                error_msg = "LLM返回的省份列表为空，无法执行全国扫描"
+                logger.error(f"❌ {error_msg}")
+                await task_manager.update_task_status(task_id, TaskStatus.FAILED, error_msg)
+                return
+
+            logger.info(f"✅ 成功获取省份列表: {total_provinces} 个省份")
+            await task_manager.update_task_status(task_id, TaskStatus.RUNNING, f"成功获取 {total_provinces} 个省份，开始级联刷新...")
+        except Exception as e:
+            error_msg = f"获取省份列表失败: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, error_msg)
+            return
+
+        # 阶段2: 串行处理每个省份的级联刷新
+        logger.info("🔄 阶段2: 开始串行处理所有省份的级联刷新")
+
+        for i, province_name in enumerate(provinces, 1):
+            province_start_time = time.time()
+
+            try:
+                logger.info(f"🌍 [省份 {i}/{total_provinces}] 开始处理: {province_name}")
+                progress_msg = f"正在处理省份 {province_name} ({i}/{total_provinces})"
+                await task_manager.update_task_status(task_id, TaskStatus.RUNNING, progress_msg)
+
+                # 创建真实的省级子任务记录，便于状态跟踪
+                province_task_id = f"{task_id}_province_{i}"
+
+                try:
+                    # 验证省份名称参数
+                    if not province_name or province_name.strip() == "":
+                        error_msg = f"省份名称为空，跳过处理 [省份 {i}/{total_provinces}]"
+                        logger.warning(f"⚠️ {error_msg}")
+                        failed_provinces += 1
+                        continue
+
+                    # 创建省级子任务记录
+                    province_task_request = ScanTaskRequest(
+                        hospital_name=f"省级级联刷新 - {province_name}",
+                        query=f"级联刷新省份 {province_name} 的所有城市、区县和医院数据",
+                        task_type=TaskType.PROVINCE
+                    )
+
+                    # 通过TaskManager创建子任务，确保在内存和数据库中都有记录
+                    await task_manager.create_task(province_task_request, province_task_id)
+                    logger.info(f"📋 创建省级子任务: {province_task_id} - {province_name}")
+
+                    # 更新子任务状态为运行中
+                    await task_manager.update_task_status(province_task_id, TaskStatus.RUNNING, f"开始处理 {province_name} 的级联刷新...")
+
+                    # 调用省份级联刷新函数
+                    await execute_province_cities_districts_refresh_task(province_task_id, province_name, task_manager)
+
+                except Exception as task_init_error:
+                    # 处理任务初始化阶段的异常
+                    error_msg = f"省级任务初始化失败: {str(task_init_error)}"
+                    logger.error(f"❌ [省份 {i}/{total_provinces}] {province_name} - {error_msg}")
+                    logger.error(f"⏱️ 初始化失败前用时: {time.time() - province_start_time:.2f}秒")
+                    failed_provinces += 1
+
+                    # 如果子任务已创建，更新失败状态
+                    if 'province_task_id' in locals():
+                        try:
+                            await task_manager.update_task_status(province_task_id, TaskStatus.FAILED, error_msg)
+                        except Exception as status_update_error:
+                            logger.error(f"❌ 更新子任务失败状态时出错: {status_update_error}")
+
+                    # 记录详细错误信息用于调试
+                    import traceback
+                    logger.error(f"❌ 省份任务初始化异常详情: {traceback.format_exc()}")
+                    continue
+
+                # 省级任务处理成功的情况
+                province_time = time.time() - province_start_time
+                logger.info(f"✅ [省份 {i}/{total_provinces}] {province_name} 处理成功 - 耗时: {province_time:.2f}秒")
+                successful_provinces += 1
+
+                # 标记子任务完成，但不删除（保留用于历史查询）
+                await task_manager.update_task_status(province_task_id, TaskStatus.COMPLETED, f"{province_name} 级联刷新完成")
+
+                # 省份间短暂休息，避免API限流
+                await asyncio.sleep(2)
+
+            except Exception as province_refresh_error:
+                # 处理省份级联刷新阶段的异常（不包括初始化）
+                province_time = time.time() - province_start_time
+                logger.error(f"❌ [省份 {i}/{total_provinces}] {province_name} 级联刷新失败: {province_refresh_error}")
+                logger.error(f"⏱️ 失败前用时: {province_time:.2f}秒")
+                failed_provinces += 1
+
+                # 如果子任务已创建，更新失败状态
+                try:
+                    error_msg = f"{province_name} 级联刷新失败: {str(province_refresh_error)}"
+                    await task_manager.update_task_status(province_task_id, TaskStatus.FAILED, error_msg)
+                except Exception as status_update_error:
+                    logger.warning(f"⚠️ 无法更新子任务 {province_task_id} 状态: {status_update_error}")
+
+                # 继续处理下一个省份
+                continue
+
+            # 显示当前进度
+            current_progress = int((i / total_provinces) * 100)
+            logger.info(f"📊 全国扫描进度: {i}/{total_provinces} ({current_progress}%) - 成功: {successful_provinces}, 失败: {failed_provinces}")
+
+        # 阶段3: 任务完成总结
+        total_time = time.time() - start_time
+        success_rate = int((successful_provinces / total_provinces) * 100) if total_provinces > 0 else 0
+
+        final_msg = f"全国扫描完成！成功处理 {successful_provinces}/{total_provinces} 个省份 (成功率: {success_rate}%)，失败 {failed_provinces} 个省份"
+        await task_manager.update_task_status(task_id, TaskStatus.COMPLETED, final_msg)
+
+        logger.info("🎉 ========== 全国扫描任务完成 ==========")
+        logger.info(f"📊 最终统计:")
+        logger.info(f"   - 总省份数: {total_provinces}")
+        logger.info(f"   - 成功处理: {successful_provinces}")
+        logger.info(f"   - 失败处理: {failed_provinces}")
+        logger.info(f"   - 成功率: {success_rate}%")
+        logger.info(f"   - 总用时: {total_time:.2f}秒")
+        logger.info(f"   - 平均每省用时: {total_time/total_provinces:.2f}秒" if total_provinces > 0 else "   - 平均每省用时: N/A")
+        logger.info(f"🚀 任务状态: COMPLETED")
+        logger.info("=" * 80)
+
+    except Exception as e:
+        total_time = time.time() - start_time
+        error_message = f"全国扫描任务执行失败: {str(e)}"
+        logger.error(f"❌ {error_message}")
+        logger.error(f"📋 异常类型: {type(e).__name__}")
+        logger.error(f"📋 处理进度: {successful_provinces}/{total_provinces} 省份")
+        logger.error(f"⏱️ 失败前用时: {total_time:.2f}秒")
+
+        import traceback
+        logger.error(f"📋 完整错误堆栈:")
+        logger.error(traceback.format_exc())
+
+        try:
+            final_error_msg = f"全国扫描失败: {error_message} (已处理 {successful_provinces}/{total_provinces} 个省份)"
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, final_error_msg)
+        except Exception as update_error:
+            logger.error(f"❌ 更新任务状态失败: {update_error}")
+
+        logger.error("=" * 80)
+        # 不重新抛出异常，避免影响主服务

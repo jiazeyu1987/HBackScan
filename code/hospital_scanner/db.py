@@ -44,9 +44,18 @@ class Database:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         result TEXT,
-                        error_message TEXT
+                        error_message TEXT,
+                        task_type TEXT DEFAULT 'hospital'
                     )
                 """)
+
+                # 添加task_type字段（如果不存在）
+                try:
+                    cursor.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'hospital'")
+                    logger.info("Added task_type column to tasks table")
+                except Exception as e:
+                    # 字段可能已存在，忽略错误
+                    logger.debug(f"task_type column may already exist: {e}")
                 
                 # 创建医院信息表
                 cursor.execute("""
@@ -86,9 +95,18 @@ class Database:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         result TEXT,
-                        error_message TEXT
+                        error_message TEXT,
+                        task_type TEXT DEFAULT 'hospital'
                     )
                 """)
+
+                # 添加task_type字段（如果不存在）
+                try:
+                    cursor.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'hospital'")
+                    logger.info("Added task_type column to tasks table")
+                except Exception as e:
+                    # 字段可能已存在，忽略错误
+                    logger.debug(f"task_type column may already exist: {e}")
                 
                 # 创建医院信息表
                 cursor.execute("""
@@ -188,20 +206,20 @@ class Database:
             logger.error(f"数据库初始化失败: {e}")
             raise
     
-    async def create_task(self, task_id: str, hospital_name: str, query: str, status: str) -> bool:
+    async def create_task(self, task_id: str, hospital_name: str, query: str, status: str, task_type: str = "hospital") -> bool:
         """创建任务"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 now = datetime.now().isoformat()
-                
+
                 cursor.execute("""
-                    INSERT INTO tasks (task_id, hospital_name, query, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (task_id, hospital_name, query, status, now, now))
-                
+                    INSERT INTO tasks (task_id, hospital_name, query, status, created_at, updated_at, task_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (task_id, hospital_name, query, status, now, now, task_type))
+
                 conn.commit()
-                logger.info(f"创建任务成功: {task_id}")
+                logger.info(f"创建任务成功: {task_id} (type: {task_type})")
                 return True
                 
         except Exception as e:
@@ -618,7 +636,7 @@ class Database:
             return 0
 
     async def get_district_by_name(self, district_name: str):
-        """根据区县名称获取区县信息"""
+        """根据区县名称获取区县信息（全局查询，可能返回多个同名区县）"""
         try:
             logger.info(f"🔍 查询区县: {district_name}")
             with sqlite3.connect(self.db_path) as conn:
@@ -626,7 +644,7 @@ class Database:
                 cursor = conn.cursor()
 
                 cursor.execute(
-                    "SELECT * FROM districts WHERE name = ? LIMIT 1",
+                    "SELECT * FROM districts WHERE name = ? ORDER BY id LIMIT 1",
                     (district_name,)
                 )
 
@@ -642,6 +660,33 @@ class Database:
 
         except Exception as e:
             logger.error(f"根据名称获取区县信息失败: {e}")
+            return None
+
+    async def get_district_by_name_and_city(self, district_name: str, city_id: int):
+        """根据区县名称和城市ID获取区县信息（精确查询）"""
+        try:
+            logger.info(f"🔍 精确查询区县: {district_name} (城市ID: {city_id})")
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT * FROM districts WHERE name = ? AND city_id = ? LIMIT 1",
+                    (district_name, city_id)
+                )
+
+                result = cursor.fetchone()
+                logger.info(f"📊 精确查询区县结果: {'找到' if result else '未找到'} {district_name} (城市ID: {city_id})")
+
+                if result:
+                    logger.info(f"✅ 区县信息: ID={result['id']}, 名称={result['name']}, 城市ID={result['city_id']}")
+                    return dict(result)
+                else:
+                    logger.info(f"❌ 区县不存在: {district_name} (城市ID: {city_id})")
+                    return None
+
+        except Exception as e:
+            logger.error(f"❌ 精确查询区县失败: {e}")
             return None
 
     async def get_districts(self, city_id: int = None, page: int = 1, page_size: int = 20) -> tuple:

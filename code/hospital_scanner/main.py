@@ -11,7 +11,7 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import logging
@@ -23,8 +23,8 @@ from urllib.parse import unquote
 
 from db import init_db, get_db, clear_all_data, clear_all_tasks as db_clear_all_tasks
 from schemas import (
-    ScanTaskRequest, 
-    ScanTaskResponse, 
+    ScanTaskRequest,
+    ScanTaskResponse,
     TaskStatus,
     ScanResult,
     HospitalInfo,
@@ -38,7 +38,21 @@ from schemas import (
     SearchRequest,
     DataLevel
 )
-from tasks import TaskManager, execute_province_cities_districts_refresh_task
+
+# Define StandardResponse for consistency
+class StandardResponse:
+    def __init__(self, code: int = 200, message: str = "Success", data=None):
+        self.code = code
+        self.message = message
+        self.data = data
+
+    def dict(self):
+        return {
+            "code": self.code,
+            "message": self.message,
+            "data": self.data
+        }
+from tasks import TaskManager, execute_province_cities_districts_refresh_task, execute_all_provinces_cascade_refresh
 from llm_client import LLMClient
 
 # 配置日志 - 修复中文字符编码问题
@@ -90,6 +104,10 @@ logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
 # 任务管理器
 task_manager = TaskManager()
 llm_client = LLMClient()
+
+def get_task_manager() -> TaskManager:
+    """FastAPI依赖注入函数，返回TaskManager实例"""
+    return task_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -549,10 +567,11 @@ async def refresh_province_cities_districts(province_name: str, background_tasks
         logger.info(f"📝 任务详情: 省份={province_name_clean}")
 
         # 使用全局task_manager创建任务，确保任务状态管理一致
-        from schemas import ScanTaskRequest
+        from schemas import ScanTaskRequest, TaskType
         task_request = ScanTaskRequest(
             hospital_name=f"省份城市区县级联刷新: {province_name_clean}",
-            query=f"级联刷新省份 {province_name_clean} 的所有城市、区县及医院数据"
+            query=f"级联刷新省份 {province_name_clean} 的所有城市、区县及医院数据",
+            task_type=TaskType.PROVINCE
         )
 
         task_id = await task_manager.create_task(task_request)
@@ -586,6 +605,97 @@ async def refresh_province_cities_districts(province_name: str, background_tasks
         import traceback
         logger.error(f"📋 完整堆栈: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+
+
+# 全国扫描（所有省份的级联刷新）
+@app.post("/refresh/all-provinces", response_model=RefreshTaskResponse,
+          summary="全国扫描 - 所有省份级联刷新",
+          description="""
+全国扫描 - 级联刷新所有省份的城市、区县和医院数据
+
+这个API端点会执行全国范围的医院数据扫描，逻辑如下：
+1. 首先从LLM获取全国所有省份列表
+2. 然后依次对每个省份执行级联刷新（包含城市、区县、医院）
+3. 使用串行处理避免过度并发导致API限流
+4. 提供详细的进度日志和错误处理
+
+特性：
+- 🌍 覆盖全国所有省级行政区
+- 📊 实时进度跟踪和详细日志记录
+- 🔁 自动重试机制和错误恢复
+- ⚡ 智能任务队列管理
+- 🛡️ API限流保护和并发控制
+
+Returns:
+    RefreshTaskResponse: 包含全国扫描任务ID的响应，可用于查询进度
+
+Example:
+    ```python
+    response = client.post("/refresh/all-provinces")
+    task_id = response.json()["task_id"]
+
+    # 查询进度
+    status = client.get(f"/tasks/{task_id}")
+    progress = status.json()["data"]["progress"]
+    ```
+""",
+          tags=["数据刷新"])
+async def refresh_all_provinces_nationwide(
+    background_tasks: BackgroundTasks,
+    task_manager: TaskManager = Depends(get_task_manager),
+):
+    """
+    全国扫描API端点 - 启动所有省份的级联刷新任务
+    """
+    logger.info("🌍 ========== API请求：启动全国扫描任务 ==========")
+
+    try:
+        # 检查是否已有全国扫描任务在运行（优先使用task_type字段，兼容旧数据）
+        active_tasks = await task_manager.get_active_tasks()
+        for task in active_tasks:
+            # 优先检查task_type字段，更可靠
+            task_type = task.get("task_type", "")
+            hospital_name = task.get("hospital_name", "")
+
+            if task_type == TaskType.NATIONWIDE.value or "全国扫描" in hospital_name:
+                task_id = task.get("task_id", "unknown")
+                logger.warning(f"发现全国扫描任务正在运行: {task_id} (type: {task_type or 'legacy'})")
+                raise HTTPException(status_code=409, detail="全国扫描任务已在运行中，请等待完成")
+
+        logger.info("📝 创建全国扫描任务...")
+
+        # 使用TaskManager创建任务，确保内存和数据库一致
+        from schemas import ScanTaskRequest, TaskType
+        task_request = ScanTaskRequest(
+            hospital_name="全国扫描 - 所有省份级联刷新",
+            query="级联刷新全国所有省份的城市、区县及医院数据",
+            task_type=TaskType.NATIONWIDE
+        )
+        task_id = await task_manager.create_task(task_request)
+
+        # 启动全国扫描后台任务
+        background_tasks.add_task(
+            execute_all_provinces_cascade_refresh,
+            task_id,
+            task_manager
+        )
+
+        logger.info(f"🎯 全国扫描任务已创建: {task_id}")
+
+        return RefreshTaskResponse(
+            task_id=task_id,
+            message="全国扫描任务已启动，将依次扫描所有省份的城市、区县和医院数据",
+            created_at=datetime.now()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 创建全国扫描任务失败: {str(e)}")
+        import traceback
+        logger.error(f"📋 完整堆栈: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"全国扫描任务创建失败: {str(e)}")
+
 
 # Note: The district endpoint was having registration issues in the original version.
 # Now we have a dedicated district endpoint for clarity.

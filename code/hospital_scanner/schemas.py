@@ -24,6 +24,12 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+class TaskType(str, Enum):
+    """任务类型枚举"""
+    HOSPITAL = "hospital"  # 单个医院扫描
+    PROVINCE = "province"  # 省级扫描
+    NATIONWIDE = "nationwide"  # 全国扫描
+
 class HospitalLevel(str, Enum):
     """医院等级枚举"""
     TERTIARY_A = "三级甲等"
@@ -70,6 +76,7 @@ class ScanTaskRequest(BaseModel):
     hospital_name: str = Field(..., description="医院名称")
     query: Optional[str] = Field(None, description="查询需求")
     options: Optional[Dict[str, Any]] = Field(default_factory=dict, description="选项参数")
+    task_type: Optional[TaskType] = Field(TaskType.HOSPITAL, description="任务类型")
     created_at: datetime = Field(default_factory=datetime.now, description="创建时间")
 
 class ScanTaskResponse(BaseModel):
