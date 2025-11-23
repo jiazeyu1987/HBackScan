@@ -38,7 +38,7 @@ from schemas import (
     SearchRequest,
     DataLevel
 )
-from tasks import TaskManager
+from tasks import TaskManager, execute_province_cities_districts_refresh_task
 from llm_client import LLMClient
 
 # 配置日志 - 修复中文字符编码问题
@@ -192,6 +192,80 @@ async def clear_all_tasks():
         logger.error(f"删除所有任务记录失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除所有任务记录失败: {str(e)}")
 
+
+@app.post("/tasks/cleanup")
+async def cleanup_completed_tasks():
+    """清理已完成的任务"""
+    try:
+        logger.info("接收到清理已完成任务的请求")
+
+        # 获取数据库连接
+        db = await get_db()
+
+        # 清理数据库中的已完成任务（清理1小时前的）
+        deleted_count = await db.cleanup_completed_tasks(1)
+
+        # 同时清理内存中的已完成任务
+        memory_deleted = await task_manager.cleanup_completed_tasks(1)
+
+        logger.info(f"任务清理完成：数据库删除{deleted_count}个，内存清理{memory_deleted}个")
+
+        return {
+            "code": 200,
+            "message": f"已清理{deleted_count}个完成的任务记录",
+            "data": {
+                "status": "success",
+                "database_deleted": deleted_count,
+                "memory_deleted": memory_deleted,
+                "cleaned_at": datetime.now().isoformat()
+            }
+        }
+
+    except HTTPException:
+        # 重新抛出HTTPException
+        raise
+    except Exception as e:
+        logger.error(f"清理已完成任务失败: {e}")
+        raise HTTPException(status_code=500, detail=f"清理已完成任务失败: {str(e)}")
+
+
+@app.post("/tasks/cleanup/{older_than_hours}")
+async def cleanup_completed_tasks_with_hours(older_than_hours: int):
+    """清理指定时间前已完成的任务"""
+    try:
+        logger.info(f"接收到清理已完成任务的请求，清理{older_than_hours}小时前的任务")
+
+        # 获取数据库连接
+        db = await get_db()
+
+        # 清理数据库中的已完成任务
+        deleted_count = await db.cleanup_completed_tasks(older_than_hours)
+
+        # 同时清理内存中的已完成任务
+        memory_deleted = await task_manager.cleanup_completed_tasks(older_than_hours)
+
+        logger.info(f"任务清理完成：数据库删除{deleted_count}个，内存清理{memory_deleted}个")
+
+        return {
+            "code": 200,
+            "message": f"已清理{deleted_count}个完成的任务记录",
+            "data": {
+                "status": "success",
+                "database_deleted": deleted_count,
+                "memory_deleted": memory_deleted,
+                "older_than_hours": older_than_hours,
+                "cleaned_at": datetime.now().isoformat()
+            }
+        }
+
+    except HTTPException:
+        # 重新抛出HTTPException
+        raise
+    except Exception as e:
+        logger.error(f"清理已完成任务失败: {e}")
+        raise HTTPException(status_code=500, detail=f"清理已完成任务失败: {str(e)}")
+
+
 @app.post("/scan", response_model=ScanTaskResponse)
 async def create_scan_task(
     request: ScanTaskRequest,
@@ -260,9 +334,11 @@ async def list_tasks():
 
 # 新增的数据刷新和查询接口
 
-@app.post("/refresh/all", response_model=RefreshTaskResponse)
+@app.post("/refresh/all", response_model=RefreshTaskResponse,
+          summary="完整数据刷新",
+          description="执行全国范围的完整数据刷新，包括所有省份、城市、区县的层级数据。这是最全面的数据刷新接口。\n\n**执行流程**：\n1. **获取省份列表**：调用LLM获取全国所有省级行政区划\n2. **省份遍历**：对每个省份自动调用省份数据刷新接口\n3. **城市处理**：获取每个省份下的所有城市数据\n4. **区县处理**：获取每个城市下的所有区县数据\n5. **数据验证**：确保完整层级关系的正确性\n\n**特点**：\n- 覆盖全国所有省级行政区划\n- 自动化批量处理\n- 完整的四级数据体系（省→市→区县→医院）\n- 支持断点续传，失败的省份可以单独重试\n\n**适用场景**：\n- 初始化系统数据\n- 定期全量数据更新\n- 数据修复和完整性检查\n\n**返回**：\n- task_id: 后台任务ID，可用于查询任务执行状态\n- message: 任务创建确认信息\n- created_at: 任务创建时间",
+          tags=["数据刷新"])
 async def refresh_all_data(background_tasks: BackgroundTasks):
-    """触发完整数据刷新任务"""
     try:
         print("=== DEBUG: 接收到完整数据刷新请求 ===")
         logger.info("接收到完整数据刷新请求")
@@ -290,9 +366,11 @@ async def refresh_all_data(background_tasks: BackgroundTasks):
         logger.error(f"创建完整数据刷新任务失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/refresh/province/{province_name}", response_model=RefreshTaskResponse)
+@app.post("/refresh/province/{province_name}", response_model=RefreshTaskResponse,
+          summary="省份数据刷新",
+          description="根据省份名称刷新该省份下的城市和区县数据。该接口会执行以下流程：\n\n1. **获取城市数据**：调用LLM获取指定省份下的所有地级市、自治州、地区等\n2. **省份处理**：检查省份是否存在，不存在则创建新省份记录\n3. **城市创建**：批量创建获取到的所有城市记录\n4. **数据验证**：确保数据的完整性和正确性\n\n**与级联刷新接口的区别**：\n- 本接口仅刷新省份和城市数据，不处理区县和医院数据\n- 级联刷新接口会处理完整的省份→城市→区县→医院数据链\n\n**参数**：\n- province_name: 省份名称（如：广东省、浙江省、四川省等）\n\n**返回**：\n- task_id: 后台任务ID，可用于查询任务执行状态\n- message: 任务创建确认信息\n- created_at: 任务创建时间",
+          tags=["数据刷新"])
 async def refresh_province_data(province_name: str, background_tasks: BackgroundTasks):
-    """刷新特定省份的数据（仅处理省级数据）"""
     try:
         # URL解码，处理中文字符
         original_province_name = province_name
@@ -385,9 +463,11 @@ async def test_district_endpoint():
     return {"message": "District test endpoint works", "status": "success"}
 
 
-@app.post("/refresh/district/{district_name}", response_model=RefreshTaskResponse)
+@app.post("/refresh/district/{district_name}", response_model=RefreshTaskResponse,
+          summary="区县医院数据刷新",
+          description="根据区县名称刷新该区县内的所有医院数据，包括医院基本信息、等级、地址、电话、网站和官网等详细信息。\n\n**功能特性**：\n- 调用阿里百炼LLM获取区县内所有医院的详细信息\n- 自动识别医院等级（三甲、三乙、二甲等）\n- 获取医院联系方式（地址、电话、网站）\n- 智能去重：避免重复创建相同医院记录\n- 异步处理：后台执行医院数据获取和保存\n\n**参数**：\n- district_name: 区县名称（如：朝阳区、海淀区、西城区等）\n\n**返回**：\n- task_id: 后台任务ID，可用于查询任务执行状态\n- message: 任务创建确认信息\n- created_at: 任务创建时间",
+          tags=["数据刷新"])
 async def refresh_district_data(district_name: str, background_tasks: BackgroundTasks):
-    """根据区县名称刷新医院数据"""
     try:
         # 验证参数
         if not district_name or not isinstance(district_name, str) or len(district_name.strip()) == 0:
@@ -452,6 +532,60 @@ async def refresh_district_data(district_name: str, background_tasks: Background
         logger.error(f"📋 完整堆栈: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
+
+@app.post("/refresh/province-cities-districts/{province_name}", response_model=RefreshTaskResponse,
+          summary="省份城市区县级联刷新",
+          description="根据省份名称级联刷新该省份下所有城市、区县及医院数据。该接口会完整执行以下流程：\n\n1. **获取城市数据**：调用LLM获取指定省份下的所有城市列表\n2. **省份处理**：检查省份是否存在，不存在则创建新省份记录\n3. **城市处理**：对每个城市检查是否存在，不存在则创建新城市记录\n4. **区县处理**：获取每个城市下的所有区县，创建区县记录\n5. **医院数据准备**：为每个区县准备医院数据刷新\n\n**特性**：\n- 不对输入省份名称进行验证，支持任意省份名称\n- 自动去重：省份、城市、区县名称相同时不会重复创建\n- 详细日志：记录每个步骤的执行情况\n- 异步处理：后台执行级联刷新任务\n\n**参数**：\n- province_name: 省份名称（如：北京市、上海市、广东省等）\n\n**返回**：\n- task_id: 后台任务ID，可用于查询任务执行状态\n- message: 任务创建确认信息\n- created_at: 任务创建时间",
+          tags=["数据刷新"])
+async def refresh_province_cities_districts(province_name: str, background_tasks: BackgroundTasks):
+    try:
+        logger.info(f"🎉 ========== 开始处理省份城市区县级联刷新请求 ==========")
+        logger.info(f"📍 请求参数: province_name='{province_name}'")
+
+        province_name_clean = province_name.strip()
+        logger.info(f"✅ 省份名称处理完成: '{province_name_clean}'")
+
+        logger.info(f"🔄 步骤1: 通过TaskManager创建任务")
+        logger.info(f"📝 任务详情: 省份={province_name_clean}")
+
+        # 使用全局task_manager创建任务，确保任务状态管理一致
+        from schemas import ScanTaskRequest
+        task_request = ScanTaskRequest(
+            hospital_name=f"省份城市区县级联刷新: {province_name_clean}",
+            query=f"级联刷新省份 {province_name_clean} 的所有城市、区县及医院数据"
+        )
+
+        task_id = await task_manager.create_task(task_request)
+        logger.info(f"🆔 任务已创建并注册到TaskManager: {task_id}")
+
+        logger.info(f"🎯 步骤2: 准备启动后台任务")
+        logger.info(f"📋 任务详情: task_id={task_id}, province_name={province_name_clean}")
+
+        logger.info(f"✅ 省份城市区县级联刷新后台任务已成功添加到队列")
+        background_tasks.add_task(execute_province_cities_districts_refresh_task, task_id, province_name_clean, task_manager)
+
+        logger.info(f"📤 步骤5: 准备响应")
+        response_message = f"省份 {province_name_clean} 的城市、区县及医院数据级联刷新任务已创建，正在后台处理中..."
+        logger.info(f"💬 响应消息: '{response_message}'")
+        logger.info(f"✅ 响应数据已生成 - task_id: {task_id}")
+
+        logger.info(f"🎉 ========== 省份城市区县级联刷新接口调用成功 ==========")
+
+        return RefreshTaskResponse(
+            task_id=task_id,
+            message=response_message,
+            created_at=datetime.now().isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 创建省份城市区县级联刷新任务失败: {e}")
+        logger.error(f"📋 异常类型: {type(e).__name__}")
+        logger.error(f"📋 异常详情: {str(e)}")
+        import traceback
+        logger.error(f"📋 完整堆栈: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
 # Note: The district endpoint was having registration issues in the original version.
 # Now we have a dedicated district endpoint for clarity.
@@ -1602,6 +1736,351 @@ async def execute_hospital_refresh_for_district(task_id: str, district_name: str
         raise e
 
 
+@app.post("/test/city")
+async def test_city_endpoint():
+    """测试城市端点是否可以注册"""
+    return {"message": "City test endpoint works", "status": "success"}
+
+
+@app.post("/refresh/city/{city_name}", response_model=RefreshTaskResponse)
+async def refresh_city_data(city_name: str, background_tasks: BackgroundTasks):
+    """
+    刷新指定城市所有区县的医院数据
+
+    Args:
+        city_name: 城市名称
+        background_tasks: FastAPI后台任务管理器
+
+    Returns:
+        RefreshTaskResponse: 包含任务ID和响应信息
+    """
+    logger.info(f"🎉 ========== 接收市级医院刷新请求 ==========")
+    logger.info(f"📍 城市名称: '{city_name}'")
+    logger.info(f"🔍 接收的原始参数: '{city_name}'")
+
+    start_time = time.time()
+
+    try:
+        # URL解码中文字符
+        from urllib.parse import unquote
+        city_name_decoded = unquote(city_name)
+        logger.info(f"✅ URL解码后的城市名称: '{city_name_decoded}'")
+
+        # 清理和标准化城市名称
+        city_name_clean = city_name_decoded.strip()
+        logger.info(f"✅ 标准化城市名称: '{city_name_clean}' (原始: '{city_name}')")
+
+        # 步骤1: 连接数据库并验证城市
+        logger.info(f"🔄 步骤1: 连接数据库")
+        logger.info(f"📊 [20%] 🔗 正在连接数据库...")
+
+        db = await get_db()
+
+        # 步骤2: 查找城市
+        logger.info(f"🔄 步骤2: 查找城市")
+        logger.info(f"📊 [40%] 🔍 正在查找城市: '{city_name_clean}'")
+
+        city_info = await db.get_city_by_name(city_name_clean)
+
+        if not city_info:
+            error_msg = f"城市 '{city_name_clean}' 不存在，请先刷新数据"
+            logger.error(f"❌ {error_msg}")
+            raise HTTPException(status_code=404, detail=error_msg)
+
+        logger.info(f"✅ 找到城市: {city_info['name']} (ID: {city_info['id']}, 省份ID: {city_info['province_id']})")
+
+        # 步骤3: 获取该城市下所有区县
+        logger.info(f"🔄 步骤3: 获取城市下所有区县")
+        logger.info(f"📊 [60%] 📍 正在获取城市 '{city_name_clean}' 下所有区县...")
+
+        districts, total_count = await db.get_districts(city_info['id'], 1, 1000)  # 获取前1000个区县，应该足够了
+
+        if not districts or total_count == 0:
+            error_msg = f"城市 '{city_name_clean}' 下没有找到任何区县"
+            logger.error(f"❌ {error_msg}")
+            raise HTTPException(status_code=404, detail=error_msg)
+
+        logger.info(f"✅ 找到 {total_count} 个区县:")
+        for district in districts[:5]:  # 只显示前5个区县
+            logger.info(f"   - {district['name']} (ID: {district['id']})")
+        if total_count > 5:
+            logger.info(f"   ... 还有 {total_count - 5} 个区县")
+
+        # 步骤4: 创建主任务
+        logger.info(f"🔄 步骤4: 创建主任务")
+        logger.info(f"📊 [80%] 📋 正在创建主任务...")
+
+        task_id = await task_manager.create_task(
+            task_type="city_hospital_refresh",
+            target=f"{city_info['name']}及所有区县医院数据",
+            description=f"刷新城市 '{city_info['name']}' 下所有 {total_count} 个区县的医院数据"
+        )
+
+        logger.info(f"✅ 主任务已创建: {task_id}")
+
+        # 步骤5: 启动后台任务
+        logger.info(f"🔄 步骤5: 启动后台任务")
+        background_tasks.add_task(execute_city_hospitals_refresh, task_id, city_info, districts)
+
+        logger.info(f"📤 步骤6: 准备响应")
+        response_message = f"城市 {city_info['name']} 及其 {total_count} 个区县医院数据刷新任务已创建，正在后台处理中..."
+        logger.info(f"💬 响应消息: '{response_message}'")
+        logger.info(f"✅ 响应数据已生成 - task_id: {task_id}")
+
+        logger.info(f"🎉 ========== 市级医院刷新接口调用成功 ==========")
+        logger.info(f"⏱️ 接口处理用时: {time.time() - start_time:.2f}秒")
+
+        return RefreshTaskResponse(
+            task_id=task_id,
+            message=response_message,
+            target=f"城市: {city_info['name']}",
+            operation="批量刷新医院数据"
+        )
+
+    except HTTPException:
+        # 重新抛出HTTP异常
+        raise
+    except Exception as e:
+        error_msg = f"创建市级医院刷新任务失败: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+
+
+async def execute_city_hospitals_refresh(task_id: str, city_info: dict, districts: list):
+    """
+    执行城市所有区县的医院数据刷新任务
+
+    Args:
+        task_id: 任务ID
+        city_info: 城市信息字典
+        districts: 区县信息列表
+    """
+    # City hospital refresh implementation
+    start_time = time.time()
+
+    try:
+        logger.info(f"🎉 ========== 开始执行市级医院刷新任务 ==========")
+        logger.info(f"📋 任务ID: {task_id}")
+        logger.info(f"🏙️ 目标城市: {city_info['name']} (ID: {city_info['id']})")
+        logger.info(f"📊 区县数量: {len(districts)} 个")
+        logger.info(f"⏰ 开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 更新任务状态为运行中
+        await task_manager.update_task_status(
+            task_id,
+            TaskStatus.RUNNING,
+            f"开始刷新城市 {city_info['name']} 的医院数据，共 {len(districts)} 个区县"
+        )
+
+        # 获取省份信息
+        db = await get_db()
+        province_info = await db.get_province_by_id(city_info['province_id'])
+        if not province_info:
+            error_msg = f"无法获取城市 '{city_info['name']}' 所属省份信息"
+            logger.error(f"❌ {error_msg}")
+            await task_manager.update_task_status(task_id, TaskStatus.FAILED, error_msg)
+            raise ValueError(error_msg)
+
+        logger.info(f"📍 完整层级: {province_info['name']} -> {city_info['name']} -> {len(districts)} 个区县")
+
+        # 统计数据
+        total_districts = len(districts)
+        completed_districts = 0
+        successful_districts = 0
+        failed_districts = 0
+        total_new_hospitals = 0
+        total_updated_hospitals = 0
+
+        # 初始化LLM客户端
+        llm_client = LLMClient()
+
+        # 逐个处理每个区县
+        for i, district in enumerate(districts):
+            district_name = district['name']
+            district_progress = int((i + 1) * 100 // total_districts)
+
+            try:
+                logger.info(f"🔄 处理第 {i+1}/{total_districts} 个区县: {district_name}")
+                logger.info(f"📊 [{district_progress}%] 🏥 正在处理区县: {district_name}")
+
+                # 更新主任务状态
+                progress_msg = f"正在处理区县 {i+1}/{total_districts}: {district_name}"
+                await task_manager.update_task_status(task_id, TaskStatus.RUNNING, progress_msg)
+
+                # 步骤1: 检查区县是否仍然存在
+                district_info = await db.get_district_by_name(district_name)
+                if not district_info:
+                    logger.warning(f"⚠️ 区县 '{district_name}' 不存在，跳过")
+                    failed_districts += 1
+                    continue
+
+                logger.info(f"✅ 找到区县: {district_info['name']} (ID: {district_info['id']})")
+
+                # 步骤2: 使用LLM获取区县内的医院数据
+                logger.info(f"🔄 步骤2: 获取区县医院数据")
+                logger.info(f"📊 [{district_progress}%] 🤖 正在调用LLM获取医院数据...")
+
+                hospitals_data = await llm_client.get_hospitals_from_district(
+                    province_info['name'],
+                    city_info['name'],
+                    district_info['name']
+                )
+
+                if not hospitals_data:
+                    logger.warning(f"⚠️ 区县 '{district_name}' 没有获取到任何医院数据")
+                    completed_districts += 1
+                    continue
+
+                logger.info(f"✅ LLM返回医院数据: {len(hospitals_data)} 家医院")
+
+                # 步骤3: 保存医院数据到数据库
+                logger.info(f"🔄 步骤3: 保存医院数据")
+                logger.info(f"📊 [{district_progress}%] 💾 正在保存医院数据...")
+
+                saved_count = 0
+                updated_count = 0
+
+                for j, hospital_data in enumerate(hospitals_data):
+                    try:
+                        # 提取医院信息
+                        hospital_name = hospital_data.get('name', '').strip()
+                        level = hospital_data.get('level', '')
+                        address = hospital_data.get('address', '')
+                        phone = hospital_data.get('phone', '')
+                        beds_count = hospital_data.get('beds_count')
+                        staff_count = hospital_data.get('staff_count')
+                        departments = hospital_data.get('departments', [])
+                        specializations = hospital_data.get('specializations', [])
+                        website = hospital_data.get('website', '')
+
+                        if not hospital_name:
+                            logger.warning(f"⚠️ 医院名称为空，跳过")
+                            continue
+
+                        # 检查医院是否已存在
+                        existing_hospital = await db.get_hospital_by_name_and_district(hospital_name, district_info['id'])
+
+                        if existing_hospital:
+                            # 更新现有医院（只有信息有变化时才更新）
+                            update_needed = False
+                            updates = {}
+
+                            if level and level != existing_hospital.get('level', ''):
+                                updates['level'] = level
+                                update_needed = True
+
+                            if address and address != existing_hospital.get('address', ''):
+                                updates['address'] = address
+                                update_needed = True
+
+                            if phone and phone != existing_hospital.get('phone', ''):
+                                updates['phone'] = phone
+                                update_needed = True
+
+                            if beds_count and beds_count != existing_hospital.get('beds_count'):
+                                updates['beds_count'] = beds_count
+                                update_needed = True
+
+                            if staff_count and staff_count != existing_hospital.get('staff_count'):
+                                updates['staff_count'] = staff_count
+                                update_needed = True
+
+                            if departments and departments != existing_hospital.get('departments', []):
+                                updates['departments'] = departments
+                                update_needed = True
+
+                            if specializations and specializations != existing_hospital.get('specializations', []):
+                                updates['specializations'] = specializations
+                                update_needed = True
+
+                            if website and website != existing_hospital.get('website', ''):
+                                updates['website'] = website
+                                update_needed = True
+
+                            if update_needed:
+                                await db.update_hospital(existing_hospital['id'], **updates)
+                                updated_count += 1
+                                logger.info(f"🔄 更新医院: {hospital_name}")
+                            else:
+                                logger.info(f"ℹ️ 医院信息无变化，跳过: {hospital_name}")
+
+                        else:
+                            # 创建新医院
+                            await db.create_hospital(
+                                name=hospital_name,
+                                district_id=district_info['id'],
+                                level=level,
+                                address=address,
+                                phone=phone,
+                                beds_count=beds_count,
+                                staff_count=staff_count,
+                                departments=departments,
+                                specializations=specializations,
+                                website=website
+                            )
+                            saved_count += 1
+                            logger.info(f"➕ 新增医院: {hospital_name}")
+
+                    except Exception as hospital_error:
+                        logger.warning(f"⚠️ 处理医院数据失败: {hospital_data.get('name', 'Unknown')}: {str(hospital_error)}")
+                        continue
+
+                # 更新统计
+                total_new_hospitals += saved_count
+                total_updated_hospitals += updated_count
+                completed_districts += 1
+                successful_districts += 1
+
+                logger.info(f"✅ 区县 '{district_name}' 处理完成: 新增 {saved_count} 家医院，更新 {updated_count} 家医院")
+
+                # 短暂延迟，避免API调用过于频繁
+                await asyncio.sleep(1)
+
+            except Exception as district_error:
+                logger.error(f"❌ 处理区县 '{district_name}' 失败: {str(district_error)}")
+                failed_districts += 1
+                completed_districts += 1
+                continue
+
+        # 更新任务状态为成功
+        final_status = f"市级医院刷新完成！成功处理 {successful_districts}/{total_districts} 个区县"
+        await task_manager.update_task_status(task_id, TaskStatus.COMPLETED, final_status)
+
+        success_message = f"城市 '{city_info['name']}' 医院数据刷新完成，共处理 {successful_districts}/{total_districts} 个区县，新增 {total_new_hospitals} 家医院，更新 {total_updated_hospitals} 家医院"
+
+        logger.info(f"🎉 ========== 市级医院刷新任务完成 ==========")
+        logger.info(f"✅ 任务ID: {task_id}")
+        logger.info(f"🏙️ 目标城市: {city_info['name']}")
+        logger.info(f"⏰ 完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏱️ 总用时: {time.time() - start_time:.2f}秒")
+        logger.info(f"📍 处理结果: {successful_districts}/{total_districts} 个区县成功")
+        logger.info(f"🏥 新增医院: {total_new_hospitals} 家")
+        logger.info(f"🔄 更新医院: {total_updated_hospitals} 家")
+        logger.info(f"❌ 失败区县: {failed_districts} 个")
+        logger.info(f"🎯 任务状态: COMPLETED")
+        logger.info(f"📋 成功消息: {success_message}")
+        logger.info(f"============================================================")
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ 执行市级医院刷新任务失败: {error_msg}")
+        logger.error(f"📋 错误详情: {type(e).__name__}: {error_msg}")
+
+        # 更新任务状态为失败
+        await task_manager.update_task_status(task_id, TaskStatus.FAILED, error_msg)
+
+        logger.error(f"💥 ========== 市级医院刷新任务失败 ==========")
+        logger.error(f"❌ 任务ID: {task_id}")
+        logger.error(f"🏙️ 目标城市: {city_info.get('name', 'Unknown')}")
+        logger.error(f"⏰ 失败时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.error(f"⏱️ 用时: {time.time() - start_time:.2f}秒")
+        logger.error(f"🔴 失败原因: {error_msg}")
+        logger.error(f"============================================================")
+
+        # 重新抛出异常
+        raise e
+
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
@@ -1610,3 +2089,4 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+# 强制重新加载 Sun, Nov 23, 2025 12:49:44 PM

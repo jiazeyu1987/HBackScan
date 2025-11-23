@@ -19,17 +19,17 @@ class LLMClient:
     """大语言模型客户端"""
     
     def __init__(self):
-        self.api_key = os.getenv("LLM_API_KEY", "")
+        self.api_key = os.getenv("DASHSCOPE_API_KEY", "")
         self.base_url = os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/api/v1/")
         self.model = os.getenv("LLM_MODEL", "deepseek-r1")
-        self.timeout = 30
+        self.timeout = 300
 
         # 初始化logger
         self.logger = logging.getLogger(__name__)
 
         if not self.api_key:
-            logger.error("❌ LLM_API_KEY未设置！请检查.env文件配置")
-            raise ValueError("LLM_API_KEY环境变量未设置，无法初始化LLM客户端")
+            logger.error("❌ DASHSCOPE_API_KEY未设置！请检查.env文件配置")
+            raise ValueError("DASHSCOPE_API_KEY环境变量未设置，无法初始化LLM客户端")
         
     def _make_request(self, messages: list, max_tokens: int = 2000) -> Optional[str]:
         """发起API请求"""

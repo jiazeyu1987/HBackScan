@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 一定要遵守的规则（非常重要）
+不能随意更换端口，如果有被占用的端口，停止占用的进程
+尽量多的写日志（存入log文件），方便调试
+代码的注释用英文不要用中午呢
+不要用虚假数据，不要硬编码
+实事求是，不要粉饰太平，有错误即使暴露，有问题及时反馈
+不要总结好的，要总结只总结问题
+
 ## Project Overview
 
 This is a **Hospital Hierarchy Scanner Microservice** (医院层级扫查微服务) - a FastAPI-based service that manages hierarchical hospital data across four levels: provinces, cities, districts, and hospitals. The system uses Alibaba's DashScope LLM API for intelligent data acquisition and SQLite for data persistence.
@@ -138,14 +146,6 @@ make test-coverage      # Generate coverage report
 ```bash
 make test-debug         # Verbose output with debugging
 pytest tests/ -v -s --capture=no --tb=long
-```
-
-### Code Quality
-```bash
-make lint               # Run linting
-make format             # Format code with black/isort
-make type-check         # Run mypy type checking
-make clean              # Clean generated files
 ```
 
 ### Single Test Execution
@@ -379,29 +379,3 @@ pytest tests/test_contracts.py -v
 - Comprehensive logging for performance analysis
 - Frontend real-time status updates and result visualization
 - Health check endpoints for monitoring system status
-
-## Testing Infrastructure
-
-The project has a sophisticated testing setup with extensive configuration:
-
-### Test Configuration (pytest.ini)
-- Comprehensive marker system for test categorization
-- Coverage reporting with HTML and XML output
-- Configurable log levels and output formats
-- Performance tracking with duration reporting
-- Branch coverage analysis with 80% minimum threshold
-
-### Test Dependencies (requirements-dev.txt)
-- **Core Testing**: pytest, pytest-cov, pytest-xdist, pytest-asyncio
-- **Performance Testing**: locust, memory-profiler, psutil
-- **Code Quality**: black, isort, flake8, mypy, bandit
-- **Mocking**: factory-boy, faker, responses
-- **Documentation**: sphinx, mkdocs
-- **Security**: semgrep, OWASP ZAP
-
-### Coverage Configuration
-- HTML reports in `htmlcov/` directory
-- XML reports for CI/CD integration
-- LCOV format for advanced coverage analysis
-- Exclusion patterns for non-production code
-- Branch coverage with precision reporting

@@ -958,6 +958,72 @@ class Database:
             logger.error(f"删除所有任务失败: {e}")
             return False
 
+    async def delete_completed_task(self, task_id: str) -> bool:
+        """删除已完成的任务记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 先删除相关的医院信息记录（如果有外键关系）
+                cursor.execute("DELETE FROM hospital_info WHERE task_id = ?", (task_id,))
+
+                # 删除任务记录（只删除已完成的任务）
+                cursor.execute("""
+                    DELETE FROM tasks
+                    WHERE task_id = ? AND status IN ('completed', 'failed')
+                """, (task_id,))
+
+                deleted_count = cursor.rowcount
+                conn.commit()
+
+                if deleted_count > 0:
+                    logger.info(f"✅ 已删除完成的任务记录: {task_id}")
+                    return True
+                else:
+                    logger.warning(f"⚠️ 任务未找到或未完成，无法删除: {task_id}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"❌ 删除完成任务记录失败: {e}")
+            return False
+
+    async def cleanup_completed_tasks(self, older_than_hours: int = 1) -> int:
+        """清理指定时间前已完成的任务"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 计算时间边界
+                cutoff_time = datetime.now().timestamp() - (older_than_hours * 3600)
+                cutoff_datetime = datetime.fromtimestamp(cutoff_time).isoformat()
+
+                # 先删除相关的医院信息记录
+                cursor.execute("""
+                    DELETE FROM hospital_info
+                    WHERE task_id IN (
+                        SELECT task_id FROM tasks
+                        WHERE status IN ('completed', 'failed')
+                        AND created_at < ?
+                    )
+                """, (cutoff_datetime,))
+
+                # 删除完成的任务记录
+                cursor.execute("""
+                    DELETE FROM tasks
+                    WHERE status IN ('completed', 'failed')
+                    AND created_at < ?
+                """, (cutoff_datetime,))
+
+                deleted_count = cursor.rowcount
+                conn.commit()
+
+                logger.info(f"✅ 已清理 {deleted_count} 个完成的任务记录（{older_than_hours}小时前）")
+                return deleted_count
+
+        except Exception as e:
+            logger.error(f"❌ 清理完成任务记录失败: {e}")
+            return 0
+
     async def clear_all_tables_data(self) -> bool:
         """清空所有表的数据，保留表结构"""
         try:
